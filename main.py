@@ -12,7 +12,7 @@ from trade_manager import add_trade, trading_allowed
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model
 from trade_manager import get_trade_history
-from demo_executor import execute_trade   # ← New import
+from demo_executor import execute_trade
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,7 +23,7 @@ exchange = get_exchange()
 
 
 async def scan():
-    await monitor_trades()   # Fast monitoring
+    await monitor_trades()
 
     try:
         logger.info("Starting signal scan...")
@@ -39,8 +39,6 @@ async def scan():
 
         for symbol in symbols:
             try:
-                logger.info(f"Scanning {symbol}")
-
                 df_15m = get_ohlcv(symbol, "15m", 200)
                 df_5m = get_ohlcv(symbol, "5m", 200)
 
@@ -53,15 +51,23 @@ async def scan():
                     qty = calculate_qty(signal["entry"], signal["sl"])
                     signal["qty"] = qty
                     results.append({"symbol": symbol, **signal})
+                    logger.info(f"SIGNAL FOUND: {symbol} {signal['direction']} conf={signal.get('confidence', 0)}")
 
             except Exception as e:
                 logger.exception(f"Symbol failed: {symbol} | {e}")
 
+        logger.info(f"Total signals found: {len(results)}")
+
+        if not results:
+            logger.info("No valid signals this scan.")
+            return
+
         results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         top3 = results[:3]
 
+        logger.info(f"Processing top {len(top3)} signals...")
+
         for trade in top3:
-            # Execute real demo trade
             order = await execute_trade(trade)
 
             if order:
@@ -86,6 +92,9 @@ async def scan():
                     f"Qty: {trade['qty']}\n"
                     f"Confidence: {trade.get('confidence', 0)}%"
                 )
+                logger.info(f"TRADE SENT: {trade['symbol']} {trade['direction']}")
+            else:
+                logger.warning(f"Trade execution FAILED for {trade['symbol']}")
 
         if len(get_trade_history()) >= 10:
             train_model()
@@ -93,8 +102,6 @@ async def scan():
     except Exception as e:
         logger.exception(f"SCAN FAILED: {e}")
 
-
-# ... (the rest of the file remains the same as previous version with fast monitoring)
 
 async def run_monitor():
     try:
@@ -127,8 +134,8 @@ def main():
     run_monitor_sync()
 
     schedule.every(1).minutes.do(heartbeat)
-    schedule.every(45).seconds.do(run_monitor_sync)   # Fast monitoring
-    schedule.every(2).minutes.do(run_scan_sync)       # Signals
+    schedule.every(45).seconds.do(run_monitor_sync)
+    schedule.every(2).minutes.do(run_scan_sync)
 
     while True:
         try:
