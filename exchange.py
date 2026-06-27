@@ -1,14 +1,34 @@
 import ccxt
+import logging
+
+logger = logging.getLogger(__name__)
+
 
 def get_exchange():
+    try:
+        logger.info(
+            "Connecting to Bybit..."
+        )
 
-    exchange = ccxt.bybit({
-        "enableRateLimit": True,
-        "options": {
-            "defaultType": "swap"
-        }
-    })
+        exchange = ccxt.bybit({
+            "enableRateLimit": True,
+            "timeout": 30000,
+            "options": {
+                "defaultType": "swap",
+                "defaultSettle": "USDT"
+            }
+        })
 
-    exchange.load_markets()
+        exchange.load_markets()
 
-    return exchange
+        logger.info(
+            f"Loaded {len(exchange.markets)} markets"
+        )
+
+        return exchange
+
+    except Exception as e:
+        logger.exception(
+            f"Exchange startup failed: {e}"
+        )
+        raise
