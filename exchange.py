@@ -6,6 +6,12 @@ logger = logging.getLogger(__name__)
 
 
 def get_exchange():
+    execute = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
+
+    if not execute:
+        logger.info("Paper mode - no real exchange connection")
+        return None  # Dummy for paper mode
+
     api_key = os.getenv("BYBIT_API_KEY")
     api_secret = os.getenv("BYBIT_API_SECRET")
     mode = os.getenv("TRADE_MODE", "demo").lower()
