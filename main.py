@@ -17,6 +17,62 @@ from telegram_alerts import send_alert
 
 exchange = get_exchange()
 
+def get_top_symbols(limit=20):
+
+    try:
+
+        markets = exchange.fetch_markets()
+
+        perps = []
+
+        for market in markets:
+
+            if (
+                market.get("swap")
+                and market.get("quote") == "USDT"
+                and market.get("active")
+            ):
+                perps.append(market)
+
+        def volume_key(market):
+
+            try:
+
+                info = market.get("info", {})
+
+                return float(
+                    info.get("turnover24h")
+                    or info.get("volume24h")
+                    or 0
+                )
+
+            except Exception:
+
+                return 0
+
+        perps.sort(
+            key=volume_key,
+            reverse=True
+        )
+
+        symbols = [m["symbol"] for m in perps[:limit]]
+
+        print(f"Top symbols: {symbols}")
+
+        return symbols
+
+    except Exception as e:
+
+        print(f"Top Symbol Error: {e}")
+
+        return [
+            "BTC/USDT:USDT",
+            "ETH/USDT:USDT",
+            "SOL/USDT:USDT",
+            "XRP/USDT:USDT",
+            "DOGE/USDT:USDT"
+        ]
+
 async def scan():
 
     logger.info("Starting scan...")
