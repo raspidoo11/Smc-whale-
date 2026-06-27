@@ -2,6 +2,13 @@ import json
 import os
 import logging
 
+def risk_amount():
+    """Calculate risk amount based on current balance (1% default)"""
+    balance_data = get_balance()
+    balance = balance_data.get("balance", 100.0)
+    return balance * 0.01  # 1% risk per trade
+
+
 logger = logging.getLogger(__name__)
 
 DATA_DIR = "data"
