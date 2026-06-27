@@ -1,4 +1,3 @@
-```python
 import asyncio
 import schedule
 import time
@@ -168,4 +167,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
