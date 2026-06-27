@@ -112,7 +112,8 @@ async def run_monitor():
 
 async def startup():
     await send_alert("🚀 SMC Whale AI Started (Demo Mode)")
-
+    from demo_executor import test_connection
+    await test_connection()
 
 def heartbeat():
     logger.info("Worker Alive")
