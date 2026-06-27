@@ -4,48 +4,27 @@ from exchange import get_exchange
 from trade_manager import get_balance
 
 logger = logging.getLogger(__name__)
-exchange = get_exchange()
-
-
-async def test_connection():
-    """Test Bybit API connection"""
-    try:
-        balance = exchange.fetch_balance()
-        logger.info(f"✅ API Connection OK | Balance: {balance.get('total', {}).get('USDT', 'N/A')} USDT")
-        return True
-    except Exception as e:
-        logger.error(f"❌ API Connection FAILED: {e}")
-        return False
+client = get_exchange()
 
 
 async def execute_trade(signal):
     if os.getenv("EXECUTE_TRADES", "false").lower() != "true":
-        logger.info("Execution disabled. Would have executed trade.")
-        return {"id": "paper_order"}
+        logger.info("Execution disabled.")
+        return {"result": {"orderId": "paper"}}
 
     try:
-        symbol = signal["symbol"]
+        symbol = signal["symbol"].replace("/", "")
         direction = signal["direction"]
-        entry = signal["entry"]
-        sl = signal["sl"]
+        qty = signal["qty"]
 
-        balance_data = get_balance()
-        total_balance = balance_data.get("balance", 100.0)
+        side = "Buy" if direction == "LONG" else "Sell"
 
-        risk_amount = total_balance * 0.05
-        distance = abs(entry - sl) or (entry * 0.01)
-
-        qty = (risk_amount / distance) * 10
-        qty = round(qty, 6)
-
-        side = "buy" if direction == "LONG" else "sell"
-
-        order = exchange.create_order(
+        order = client.place_active_order(
             symbol=symbol,
-            type="market",
             side=side,
-            amount=qty,
-            params={"leverage": 10}
+            order_type="Market",
+            qty=qty,
+            time_in_force="GoodTillCancel"
         )
 
         logger.info(f"✅ EXECUTED {direction} {symbol} | Qty: {qty}")
@@ -58,24 +37,21 @@ async def execute_trade(signal):
 
 async def close_position(symbol, direction):
     if os.getenv("EXECUTE_TRADES", "false").lower() != "true":
-        logger.info("Execution disabled. Would have closed position.")
         return True
 
     try:
-        side = "sell" if direction == "LONG" else "buy"
-        positions = exchange.fetch_positions([symbol])
-        for pos in positions:
-            if pos['symbol'] == symbol and float(pos.get('contracts', 0)) > 0:
-                amount = float(pos['contracts'])
-                order = exchange.create_order(
-                    symbol=symbol,
-                    type="market",
-                    side=side,
-                    amount=amount
-                )
-                logger.info(f"Closed {direction} position on {symbol}")
-                return order
-        return None
+        side = "Sell" if direction == "LONG" else "Buy"
+        # Close position logic (simplified)
+        order = client.place_active_order(
+            symbol=symbol.replace("/", ""),
+            side=side,
+            order_type="Market",
+            qty=0.01,  # Adjust based on position
+            time_in_force="GoodTillCancel",
+            reduce_only=True
+        )
+        logger.info(f"Closed {direction} position on {symbol}")
+        return order
     except Exception as e:
-        logger.error(f"Close failed for {symbol}: {e}")
+        logger.error(f"Close failed: {e}")
         return None
