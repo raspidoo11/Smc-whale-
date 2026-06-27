@@ -1,19 +1,14 @@
 import logging
-from trade_manager import risk_amount  # We'll add this to trade_manager if needed
+from trade_manager import risk_amount
 
 logger = logging.getLogger(__name__)
 
 
 def calculate_qty(entry, sl):
     """Calculate position size based on risk"""
-    risk = 100.0 * 0.01  # Default 1% risk if no balance loaded
-    try:
-        # Try to use advanced risk from trade_manager
-        risk = risk_amount() if 'risk_amount' in globals() else risk
-    except:
-        pass
-
+    risk = risk_amount()
     distance = abs(entry - sl)
+
     if distance <= 0:
         return 0.0
 
