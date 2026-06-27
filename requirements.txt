@@ -1,8 +1,7 @@
-bybit
+ccxt==4.4.91
+pandas
 python-dotenv
 python-telegram-bot
 schedule
-pandas
-numpy
 xgboost
 joblib
