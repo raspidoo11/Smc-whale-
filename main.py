@@ -14,8 +14,8 @@ format="%(asctime)s | %(levelname)s | %(message)s"
 logger = logging.getLogger(name)
 exchange = get_exchange()
 async def scan():
-try:
-logger.info("Starting scan...")
+    try:
+    logger.info("Starting scan...")
     symbols = get_top_symbols(20)
 
     logger.info(f"Found {len(symbols)} symbols")
