@@ -7,129 +7,157 @@ from strategy import get_signal
 from paper_trader import calculate_qty
 from exchange import get_exchange
 from telegram_alerts import send_alert
+
 logging.basicConfig(
-level=logging.INFO,
-format="%(asctime)s | %(levelname)s | %(message)s"
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
 )
-logger = logging.getLogger(name)
+logger = logging.getLogger(__name__)
 exchange = get_exchange()
+
 async def scan():
     try:
-    logger.info("Starting scan...")
-    symbols = get_top_symbols(20)
+        logger.info("Starting scan...")
 
-    logger.info(f"Found {len(symbols)} symbols")
+        symbols = get_top_symbols(20)
 
-    results = []
+        logger.info(f"Found {len(symbols)} symbols")
 
-    for symbol in symbols:
-        try:
-            logger.info(f"Scanning {symbol}")
+        results = []
 
-            df_15m = get_ohlcv(symbol, "15m", 200)
-            df_5m = get_ohlcv(symbol, "5m", 200)
+        for symbol in symbols:
+            try:
+                logger.info(f"Scanning {symbol}")
 
-            if df_15m is None or df_5m is None:
-                logger.warning(f"{symbol} returned no data")
-                continue
-
-            signal = get_signal(df_15m, df_5m)
-
-            if signal:
-                qty = calculate_qty(
-                    signal["entry"],
-                    signal["sl"]
+                df_15m = get_ohlcv(
+                    symbol,
+                    "15m",
+                    200
                 )
 
-                signal["qty"] = qty
-
-                logger.info(
-                    f"SIGNAL {symbol} "
-                    f"{signal['direction']} "
-                    f"{signal['confidence']}%"
+                df_5m = get_ohlcv(
+                    symbol,
+                    "5m",
+                    200
                 )
 
-                results.append({
-                    "symbol": symbol,
-                    **signal
-                })
+                if df_15m is None or df_5m is None:
+                    logger.warning(
+                        f"{symbol} returned no data"
+                    )
+                    continue
 
-        except Exception as e:
-            logger.exception(
-                f"Symbol failed: {symbol} | {e}"
-            )
+                signal = get_signal(
+                    df_15m,
+                    df_5m
+                )
 
-    logger.info(
-        f"Scan complete. Signals found: {len(results)}"
-    )
+                if signal:
+                    qty = calculate_qty(
+                        signal["entry"],
+                        signal["sl"]
+                    )
 
-    results.sort(
-        key=lambda x: x["confidence"],
-        reverse=True
-    )
+                    signal["qty"] = qty
 
-    top3 = results[:3]
+                    logger.info(
+                        f"SIGNAL {symbol} "
+                        f"{signal['direction']} "
+                        f"{signal['confidence']}%"
+                    )
 
-    logger.info(
-        f"Sending {len(top3)} Telegram alerts"
-    )
+                    results.append({
+                        "symbol": symbol,
+                        **signal
+                    })
 
-    for trade in top3:
-        await send_alert(
-            f"📈 {trade['symbol']}\n\n"
-            f"Direction: {trade['direction']}\n"
-            f"Entry: {trade['entry']:.4f}\n"
-            f"SL: {trade['sl']:.4f}\n"
-            f"TP: {trade['tp']:.4f}\n"
-            f"Qty: {trade['qty']}\n"
-            f"Confidence: {trade['confidence']}%"
+            except Exception as e:
+                logger.exception(
+                    f"Symbol failed: {symbol} | {e}"
+                )
+
+        logger.info(
+            f"Scan complete. Signals found: {len(results)}"
         )
 
-except Exception as e:
-    logger.exception(f"SCAN FAILED: {e}")
-async def startup():
-await send_alert(
-"🚀 SMC Whale AI Started"
-)
-def heartbeat():
-logger.info("Worker Alive")
-def run_scan():
-try:
-asyncio.run(scan())
-except Exception as e:
-logger.exception(
-f"Scheduled scan failed: {e}"
-)
-def main():
-logger.info(
-"🚀 Starting SMC Whale AI"
-)
-asyncio.run(startup())
+        results.sort(
+            key=lambda x: x["confidence"],
+            reverse=True
+        )
 
-logger.info(
-    "Running initial scan"
-)
+        top3 = results[:3]
 
-run_scan()
+        logger.info(
+            f"Sending {len(top3)} Telegram alerts"
+        )
 
-schedule.every(1).minutes.do(
-    heartbeat
-)
-
-schedule.every(5).minutes.do(
-    run_scan
-)
-
-while True:
-    try:
-        schedule.run_pending()
-        time.sleep(5)
+        for trade in top3:
+            await send_alert(
+                f"📈 {trade['symbol']}\n\n"
+                f"Direction: {trade['direction']}\n"
+                f"Entry: {trade['entry']:.4f}\n"
+                f"SL: {trade['sl']:.4f}\n"
+                f"TP: {trade['tp']:.4f}\n"
+                f"Qty: {trade['qty']}\n"
+                f"Confidence: {trade['confidence']}%"
+            )
 
     except Exception as e:
         logger.exception(
-            f"Main loop error: {e}"
+            f"SCAN FAILED: {e}"
         )
 
-        time.sleep(30)
-if name == "main":
-main()
+
+async def startup():
+    await send_alert(
+        "🚀 SMC Whale AI Started"
+    )
+
+
+def heartbeat():
+    logger.info("Worker Alive")
+
+
+def run_scan():
+    try:
+        asyncio.run(scan())
+    except Exception as e:
+        logger.exception(
+            f"Scheduled scan failed: {e}"
+        )
+
+
+def main():
+    logger.info(
+        "🚀 Starting SMC Whale AI"
+    )
+
+    asyncio.run(startup())
+
+    logger.info(
+        "Running initial scan"
+    )
+
+    run_scan()
+
+    schedule.every(1).minutes.do(
+        heartbeat
+    )
+
+    schedule.every(5).minutes.do(
+        run_scan
+    )
+
+    while True:
+        try:
+            schedule.run_pending()
+            time.sleep(5)
+        except Exception as e:
+            logger.exception(
+                f"Main loop error: {e}"
+            )
+            time.sleep(30)
+
+
+if __name__ == "__main__":
+    main()
