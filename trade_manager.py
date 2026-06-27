@@ -5,44 +5,24 @@ import logging
 logger = logging.getLogger(__name__)
 
 DATA_DIR = "data"
+os.makedirs(DATA_DIR, exist_ok=True)  # Ensure data folder exists
 
-BALANCE_FILE = os.path.join(
-    DATA_DIR,
-    "paper_balance.json"
-)
-
-OPEN_TRADES_FILE = os.path.join(
-    DATA_DIR,
-    "open_trades.json"
-)
-
-HISTORY_FILE = os.path.join(
-    DATA_DIR,
-    "trade_history.json"
-)
+BALANCE_FILE = os.path.join(DATA_DIR, "paper_balance.json")
+OPEN_TRADES_FILE = os.path.join(DATA_DIR, "open_trades.json")
+HISTORY_FILE = os.path.join(DATA_DIR, "trade_history.json")
 
 
 def load_json(file_path, default):
     try:
-        with open(
-            file_path,
-            "r"
-        ) as f:
+        with open(file_path, "r") as f:
             return json.load(f)
     except Exception:
         return default
 
 
 def save_json(file_path, data):
-    with open(
-        file_path,
-        "w"
-    ) as f:
-        json.dump(
-            data,
-            f,
-            indent=4
-        )
+    with open(file_path, "w") as f:
+        json.dump(data, f, indent=4)
 
 
 def get_balance():
@@ -58,55 +38,33 @@ def get_balance():
 
 
 def save_balance(data):
-    save_json(
-        BALANCE_FILE,
-        data
-    )
+    save_json(BALANCE_FILE, data)
 
 
 def get_open_trades():
-    return load_json(
-        OPEN_TRADES_FILE,
-        []
-    )
+    return load_json(OPEN_TRADES_FILE, [])
 
 
 def save_open_trades(trades):
-    save_json(
-        OPEN_TRADES_FILE,
-        trades
-    )
+    save_json(OPEN_TRADES_FILE, trades)
 
 
 def get_trade_history():
-    return load_json(
-        HISTORY_FILE,
-        []
-    )
+    return load_json(HISTORY_FILE, [])
 
 
 def save_trade_history(history):
-    save_json(
-        HISTORY_FILE,
-        history
-    )
+    save_json(HISTORY_FILE, history)
 
 
 def add_trade(trade):
     trades = get_open_trades()
     trades.append(trade)
     save_open_trades(trades)
-    logger.info(
-        f"Trade added: "
-        f"{trade['symbol']}"
-    )
+    logger.info(f"Trade added: {trade['symbol']}")
 
 
-def close_trade(
-    symbol,
-    exit_price,
-    result
-):
+def close_trade(symbol, exit_price, result):
     trades = get_open_trades()
     history = get_trade_history()
 
@@ -116,29 +74,20 @@ def close_trade(
     for trade in trades:
         if (
             trade["symbol"] == symbol
-            and trade["status"] == "OPEN"
+            and trade.get("status") == "OPEN"
             and closed_trade is None
         ):
             trade["status"] = result
             trade["exit_price"] = exit_price
             closed_trade = trade
         else:
-            remaining.append(
-                trade
-            )
+            remaining.append(trade)
 
     if closed_trade:
-        history.append(
-            closed_trade
-        )
-        save_trade_history(
-            history
-        )
+        history.append(closed_trade)
+        save_trade_history(history)
 
-    save_open_trades(
-        remaining
-    )
-
+    save_open_trades(remaining)
     return closed_trade
 
 
@@ -147,15 +96,21 @@ def update_balance(pnl):
     data["balance"] += pnl
     data["daily_pnl"] += pnl
 
-    if (
-        data["daily_pnl"]
-        > data["peak_daily_pnl"]
-    ):
-        data["peak_daily_pnl"] = (
-            data["daily_pnl"]
-        )
+    if data["daily_pnl"] > data["peak_daily_pnl"]:
+        data["peak_daily_pnl"] = data["daily_pnl"]
 
     save_balance(data)
+    logger.info(f"Balance updated: ${data['balance']:.2f}")
+    return data
 
-    logger.info(
-        f"Balance updated
+
+def trading_allowed():
+    data = get_balance()
+    daily = data["daily_pnl"]
+    peak = data["peak_daily_pnl"]
+
+    if peak >= 10 and daily <= 10:   # You can adjust these thresholds
+        logger.info("Daily target protected.")
+        return False
+
+    return True
