@@ -1,92 +1,110 @@
 import pandas as pd
-import numpy as np
 
 def calculate_features(df):
 
-    df = df.copy()
+```
+df = df.copy()
 
-    df["atr"] = (
-        df["high"] - df["low"]
-    ).rolling(14).mean()
+df["atr"] = (
+    df["high"] - df["low"]
+).rolling(14).mean()
 
-    df["volume_ma"] = (
-        df["volume"]
-    ).rolling(20).mean()
+df["volume_ma"] = (
+    df["volume"]
+).rolling(20).mean()
 
-    df["volume_spike"] = (
-        df["volume"] >
-        df["volume_ma"] * 1.5
-    ).astype(int)
+df["volume_spike"] = (
+    df["volume"] >
+    df["volume_ma"] * 1.5
+).astype(int)
 
-    df["body"] = abs(
-        df["close"] - df["open"]
-    )
+df["body"] = abs(
+    df["close"] - df["open"]
+)
 
-    df["displacement"] = (
-        df["body"] >
-        df["atr"] * 0.7
-    ).astype(int)
+df["displacement"] = (
+    df["body"] >
+    df["atr"] * 0.7
+).astype(int)
 
-    return df
-
+return df
+```
 
 def bullish_bos(df):
 
-    last_high = df["high"].iloc[-10:-1].max()
-
-    return (
-        df["close"].iloc[-1] > last_high
-    )
-
+```
+return (
+    df["close"].iloc[-1] >
+    df["high"].iloc[-10:-1].max()
+)
+```
 
 def bearish_bos(df):
 
-    last_low = df["low"].iloc[-10:-1].min()
+```
+return (
+    df["close"].iloc[-1] <
+    df["low"].iloc[-10:-1].min()
+)
+```
 
-    return (
-        df["close"].iloc[-1] < last_low
-    )
+def get_signal(df_15m, df_5m):
 
+```
+df_15m = calculate_features(df_15m)
 
-def confidence_score(df):
+df_5m = calculate_features(df_5m)
 
-    score = 0
+trend_bull = bullish_bos(df_15m)
+trend_bear = bearish_bos(df_15m)
 
-    latest = df.iloc[-1]
+latest = df_5m.iloc[-1]
 
-    if latest["volume_spike"] == 1:
-        score += 25
+score = 0
 
-    if latest["displacement"] == 1:
-        score += 25
+if latest["volume_spike"] == 1:
+    score += 35
 
-    if bullish_bos(df):
-        score += 25
+if latest["displacement"] == 1:
+    score += 35
 
-    if bearish_bos(df):
-        score += 25
+if trend_bull:
+    score += 15
 
-    return score
+if trend_bear:
+    score += 15
 
+entry = latest["close"]
 
-def get_signal(df):
+atr = latest["atr"]
 
-    df = calculate_features(df)
+if trend_bull and score >= 70:
 
-    score = confidence_score(df)
+    sl = entry - atr
 
-    if bullish_bos(df) and score >= 75:
+    tp = entry + (entry - sl) * 1.5
 
-        return {
-            "direction": "LONG",
-            "confidence": score
-        }
+    return {
+        "direction": "LONG",
+        "confidence": score,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp
+    }
 
-    if bearish_bos(df) and score >= 75:
+if trend_bear and score >= 70:
 
-        return {
-            "direction": "SHORT",
-            "confidence": score
-        }
+    sl = entry + atr
 
-    return None
+    tp = entry - (sl - entry) * 1.5
+
+    return {
+        "direction": "SHORT",
+        "confidence": score,
+        "entry": entry,
+        "sl": sl,
+        "tp": tp
+    }
+
+return None
+```
