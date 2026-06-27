@@ -20,7 +20,6 @@ exchange = get_exchange()
 
 async def scan():
 
-```
 try:
 
     logger.info("Starting scan...")
@@ -120,25 +119,20 @@ except Exception as e:
     logger.exception(
         f"SCAN FAILED: {e}"
     )
-```
 
 async def startup():
 
-```
 await send_alert(
     "🚀 SMC Whale AI Started"
 )
-```
 
 def heartbeat():
 
-```
 logger.info("Worker Alive")
-```
+
 
 def run_scan():
 
-```
 try:
 
     asyncio.run(scan())
@@ -148,11 +142,9 @@ except Exception as e:
     logger.exception(
         f"Scheduled scan failed: {e}"
     )
-```
 
 def main():
-
-```
+    
 logger.info(
     "🚀 Starting SMC Whale AI"
 )
@@ -189,5 +181,5 @@ while True:
 
         time.sleep(30)
 
-if **name** == "**main**":
+if __name__ == "__main__":
 main()
