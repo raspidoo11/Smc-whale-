@@ -1,5 +1,9 @@
 import pandas as pd
+import logging
 from xgboost_trainer import get_xgboost_probability
+
+logger = logging.getLogger(__name__)
+
 
 def calculate_features(df):
     df = df.copy()
@@ -67,7 +71,6 @@ def get_signal(df_15m, df_5m):
 
         entry = latest["close"]
 
-        # XGBoost AI Probability
         trade_features = {
             'volume_spike': latest["volume_spike"],
             'displacement': latest["displacement"],
@@ -75,15 +78,17 @@ def get_signal(df_15m, df_5m):
             'sweep': 1 if (bull_sweep or bear_sweep) else 0,
             'fvg': 1 if (bull_fvg or bear_fvg) else 0,
             'atr': float(atr),
-            'qty': 1.0,  # placeholder
+            'qty': 1.0,
             'risk_reward': 1.5
         }
         ai_prob = get_xgboost_probability(trade_features)
 
-        # Final Confidence = 60% SMC + 40% AI
         final_confidence = int(0.6 * score + 0.4 * ai_prob)
 
-        if trend_bull and final_confidence >= 60:
+        # Debug log - very useful
+        logger.info(f"Signal check | {entry} | trend_bull={trend_bull} | score={score} | ai={ai_prob} | final={final_confidence}")
+
+        if trend_bull and final_confidence >= 55:   # Temporarily lowered
             sl = entry - atr
             tp = entry + (entry - sl) * 1.5
             return {
@@ -95,7 +100,7 @@ def get_signal(df_15m, df_5m):
                 "ai_prob": ai_prob
             }
 
-        if trend_bear and final_confidence >= 60:
+        if trend_bear and final_confidence >= 55:
             sl = entry + atr
             tp = entry - (sl - entry) * 1.5
             return {
@@ -110,5 +115,5 @@ def get_signal(df_15m, df_5m):
         return None
 
     except Exception as e:
-        logger.exception(f"Signal generation error: {e}")
+        logger.exception(f"Signal error: {e}")
         return None
