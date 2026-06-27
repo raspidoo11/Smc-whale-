@@ -1,6 +1,14 @@
-import asyncio import schedule import time import logging
-from scanner import get_top_symbols, get_ohlcv from strategy import get_signal from paper_trader import calculate_qty from exchange import get_exchange from telegram_alerts import send_alert
-logging.basicConfig( level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s" )
+import asyncio
+import schedule
+import time
+import logging
+
+from scanner import get_top_symbols, get_ohlcv
+from strategy import get_signal
+from paper_trader import calculate_qty
+from exchange import get_exchange
+from telegram_alerts import send_alert
+
 logger = logging.getLogger(name)
 exchange = get_exchange()
 async def scan():
