@@ -3,6 +3,7 @@ import schedule
 import time
 import logging
 import os
+from trade_monitor import monitor_trades
 
 from scanner import get_top_symbols, get_ohlcv
 from strategy import get_signal
@@ -20,6 +21,7 @@ exchange = get_exchange()
 
 
 async def scan():
+    await monitor_trades()
     try:
         logger.info("Starting scan...")
 
