@@ -11,7 +11,7 @@ from telegram_alerts import send_alert
 from trade_manager import add_trade, trading_allowed
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model
-from trade_manager import get_trade_history  # for training check
+from trade_manager import get_trade_history
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,11 +22,9 @@ exchange = get_exchange()
 
 
 async def scan():
-    # 1. Monitor existing open trades first
-    await monitor_trades()
-
+    """Main signal scanning + new trade alerts"""
     try:
-        logger.info("Starting scan...")
+        logger.info("Starting signal scan...")
 
         if not trading_allowed():
             logger.info("Daily target reached. Trading paused.")
@@ -71,8 +69,6 @@ async def scan():
         results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         top3 = results[:3]
 
-        logger.info(f"Sending {len(top3)} new paper trades")
-
         for trade in top3:
             add_trade({
                 "symbol": trade["symbol"],
@@ -95,12 +91,20 @@ async def scan():
                 f"Confidence: {trade.get('confidence', 0)}%"
             )
 
-        # Train XGBoost model if we have enough closed trades
+        # Retrain XGBoost if enough data
         if len(get_trade_history()) >= 10:
             train_model()
 
     except Exception as e:
         logger.exception(f"SCAN FAILED: {e}")
+
+
+async def run_monitor():
+    """Fast monitoring loop for open trades"""
+    try:
+        await monitor_trades()
+    except Exception as e:
+        logger.exception(f"Monitor failed: {e}")
 
 
 async def startup():
@@ -111,22 +115,30 @@ def heartbeat():
     logger.info("Worker Alive")
 
 
-def run_scan():
-    try:
-        asyncio.run(scan())
-    except Exception as e:
-        logger.exception(f"Scheduled scan failed: {e}")
+def run_scan_sync():
+    asyncio.run(scan())
+
+
+def run_monitor_sync():
+    asyncio.run(run_monitor())
 
 
 def main():
     logger.info("🚀 Starting SMC Whale AI")
 
     asyncio.run(startup())
-    logger.info("Running initial scan")
-    run_scan()
+    logger.info("Running initial scan + monitor")
+    run_scan_sync()
+    run_monitor_sync()
 
+    # Heartbeat every minute
     schedule.every(1).minutes.do(heartbeat)
-    schedule.every(5).minutes.do(run_scan)
+
+    # Fast monitoring every 45 seconds (syncs much better with live price)
+    schedule.every(45).seconds.do(run_monitor_sync)
+
+    # Signal scanning every 2 minutes
+    schedule.every(2).minutes.do(run_scan_sync)
 
     while True:
         try:
