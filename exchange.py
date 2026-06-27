@@ -16,7 +16,7 @@ def get_exchange():
         "options": {
             "defaultType": "swap",
             "defaultSettle": "USDT",
-            "recvWindow": 10000   # Helps with timing issues
+            "recvWindow": 10000
         }
     }
 
@@ -26,9 +26,16 @@ def get_exchange():
 
     if mode == "demo":
         config["options"]["testnet"] = True
-        logger.info("🚀 Bybit Testnet (Demo) V5")
+        # Explicit Testnet URLs
+        config["urls"] = {
+            'api': {
+                'public': 'https://api-testnet.bybit.com',
+                'private': 'https://api-testnet.bybit.com'
+            }
+        }
+        logger.info("🚀 Using Bybit Testnet (https://api-testnet.bybit.com)")
     else:
-        logger.info("Bybit Live V5")
+        logger.info("Using Bybit Live")
 
     exchange = ccxt.bybit(config)
     exchange.load_markets()
