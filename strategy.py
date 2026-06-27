@@ -31,64 +31,59 @@ def calculate_features(df):
 
 def bullish_bos(df):
     return (
-        df["close"].iloc[-1] >
-        df["high"].iloc[-10:-1].max()
+        df["close"].iloc[-1]
+        > df["high"].iloc[-10:-1].max()
     )
 
 
 def bearish_bos(df):
     return (
-        df["close"].iloc[-1] <
-        df["low"].iloc[-10:-1].min()
+        df["close"].iloc[-1]
+        < df["low"].iloc[-10:-1].min()
     )
 
 
 def get_signal(df_15m, df_5m):
-    df_15m = calculate_features(df_15m)
-    df_5m = calculate_features(df_5m)
+    try:
+        if len(df_15m) < 30 or len(df_5m) < 30:
+            return None
 
-    trend_bull = bullish_bos(df_15m)
-    trend_bear = bearish_bos(df_15m)
+        df_15m = calculate_features(df_15m)
+        df_5m = calculate_features(df_5m)
 
-    latest = df_5m.iloc[-1]
+        trend_bull = bullish_bos(df_15m)
+        trend_bear = bearish_bos(df_15m)
 
-    score = 0
+        latest = df_5m.iloc[-1]
 
-    if latest["volume_spike"] == 1:
-        score += 35
+        atr = latest["atr"]
 
-    if latest["displacement"] == 1:
-        score += 35
+        if pd.isna(atr) or atr <= 0:
+            return None
 
-    if trend_bull:
-        score += 15
+        bull_sweep = (
+            latest["low"]
+            < df_5m["low"].iloc[-10:-1].min()
+            and latest["close"] > latest["open"]
+        )
 
-    if trend_bear:
-        score += 15
+        bear_sweep = (
+            latest["high"]
+            > df_5m["high"].iloc[-10:-1].max()
+            and latest["close"] < latest["open"]
+        )
 
-    entry = latest["close"]
-    atr = latest["atr"]
+        bull_fvg = (
+            df_5m["low"].iloc[-1]
+            > df_5m["high"].iloc[-3]
+        )
 
-    if trend_bull and score >= 70:
-        sl = entry - atr
-        tp = entry + (entry - sl) * 1.5
-        return {
-            "direction": "LONG",
-            "confidence": score,
-            "entry": entry,
-            "sl": sl,
-            "tp": tp
-        }
+        bear_fvg = (
+            df_5m["high"].iloc[-1]
+            < df_5m["low"].iloc[-3]
+        )
 
-    if trend_bear and score >= 70:
-        sl = entry + atr
-        tp = entry - (sl - entry) * 1.5
-        return {
-            "direction": "SHORT",
-            "confidence": score,
-            "entry": entry,
-            "sl": sl,
-            "tp": tp
-        }
+        score = 0
 
-    return None
+        if latest["volume_spike"] == 1:
+            score +=
