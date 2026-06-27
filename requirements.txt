@@ -1,9 +1,8 @@
-ccxt==4.4.91
-pandas==2.3.0
-numpy==2.3.1
-python-dotenv==1.1.1
-python-telegram-bot==22.2
-schedule==1.2.2
-xgboost==3.0.2
-scikit-learn==1.7.0
-joblib==1.5.1
+bybit
+python-dotenv
+python-telegram-bot
+schedule
+pandas
+numpy
+xgboost
+joblib
