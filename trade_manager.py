@@ -2,17 +2,10 @@ import json
 import os
 import logging
 
-def risk_amount():
-    """Calculate risk amount based on current balance (1% default)"""
-    balance_data = get_balance()
-    balance = balance_data.get("balance", 100.0)
-    return balance * 0.01  # 1% risk per trade
-
-
 logger = logging.getLogger(__name__)
 
 DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True)  # Ensure data folder exists
+os.makedirs(DATA_DIR, exist_ok=True)
 
 BALANCE_FILE = os.path.join(DATA_DIR, "paper_balance.json")
 OPEN_TRADES_FILE = os.path.join(DATA_DIR, "open_trades.json")
@@ -39,12 +32,9 @@ def get_balance():
         "peak_daily_pnl": 0.0
     }
     data = load_json(BALANCE_FILE, default)
-    
-    # Ensure all keys exist (for backward compatibility)
     for key, value in default.items():
         if key not in data:
             data[key] = value
-    
     return data
 
 
@@ -60,12 +50,9 @@ def save_open_trades(trades):
     save_json(OPEN_TRADES_FILE, trades)
 
 
-def get_trade_history():
-    return load_json(HISTORY_FILE, [])
-
-
-def save_trade_history(history):
-    save_json(HISTORY_FILE, history)
+def risk_amount():
+    data = get_balance()
+    return data.get("balance", 100.0) * 0.01
 
 
 def add_trade(trade):
@@ -78,13 +65,12 @@ def add_trade(trade):
 def close_trade(symbol, exit_price, result):
     trades = get_open_trades()
     history = get_trade_history()
-
     remaining = []
     closed_trade = None
 
     for trade in trades:
         if (
-            trade["symbol"] == symbol
+            trade.get("symbol") == symbol
             and trade.get("status") == "OPEN"
             and closed_trade is None
         ):
@@ -102,14 +88,20 @@ def close_trade(symbol, exit_price, result):
     return closed_trade
 
 
+def get_trade_history():
+    return load_json(HISTORY_FILE, [])
+
+
+def save_trade_history(history):
+    save_json(HISTORY_FILE, history)
+
+
 def update_balance(pnl):
     data = get_balance()
     data["balance"] += pnl
     data["daily_pnl"] += pnl
-
     if data["daily_pnl"] > data["peak_daily_pnl"]:
         data["peak_daily_pnl"] = data["daily_pnl"]
-
     save_balance(data)
     logger.info(f"Balance updated: ${data['balance']:.2f}")
     return data
@@ -117,11 +109,7 @@ def update_balance(pnl):
 
 def trading_allowed():
     data = get_balance()
-    daily = data["daily_pnl"]
-    peak = data["peak_daily_pnl"]
-
-    if peak >= 10 and daily <= 10:   # You can adjust these thresholds
+    if data["peak_daily_pnl"] >= 10 and data["daily_pnl"] <= 10:
         logger.info("Daily target protected.")
         return False
-
     return True
