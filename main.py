@@ -2,8 +2,6 @@ import asyncio
 import schedule
 import time
 import logging
-import os
-from trade_monitor import monitor_trades
 
 from scanner import get_top_symbols, get_ohlcv
 from strategy import get_signal
@@ -11,6 +9,7 @@ from paper_trader import calculate_qty
 from exchange import get_exchange
 from telegram_alerts import send_alert
 from trade_manager import add_trade, trading_allowed
+from trade_monitor import monitor_trades
 
 logging.basicConfig(
     level=logging.INFO,
@@ -21,7 +20,9 @@ exchange = get_exchange()
 
 
 async def scan():
+    # Monitor existing open trades first
     await monitor_trades()
+
     try:
         logger.info("Starting scan...")
 
@@ -55,7 +56,10 @@ async def scan():
                         f"SIGNAL {symbol} {signal['direction']} {signal['confidence']}%"
                     )
 
-                    results.append({"symbol": symbol, **signal})
+                    results.append({
+                        "symbol": symbol,
+                        **signal
+                    })
 
             except Exception as e:
                 logger.exception(f"Symbol failed: {symbol} | {e}")
@@ -65,7 +69,7 @@ async def scan():
         results.sort(key=lambda x: x["confidence"], reverse=True)
         top3 = results[:3]
 
-        logger.info(f"Sending {len(top3)} Telegram alerts")
+        logger.info(f"Sending {len(top3)} new paper trades")
 
         for trade in top3:
             add_trade({
@@ -79,7 +83,8 @@ async def scan():
             })
 
             await send_alert(
-                f"📈 {trade['symbol']}\n\n"
+                f"📈 NEW PAPER TRADE\n\n"
+                f"{trade['symbol']}\n"
                 f"Direction: {trade['direction']}\n"
                 f"Entry: {trade['entry']:.4f}\n"
                 f"SL: {trade['sl']:.4f}\n"
