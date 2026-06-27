@@ -86,4 +86,48 @@ def get_signal(df_15m, df_5m):
         score = 0
 
         if latest["volume_spike"] == 1:
-            score +=
+            score += 25
+
+        if latest["displacement"] == 1:
+            score += 20
+
+        if trend_bull:
+            score += 15
+
+        if trend_bear:
+            score += 15
+
+        if bull_sweep or bear_sweep:
+            score += 15
+
+        if bull_fvg or bear_fvg:
+            score += 10
+
+        entry = latest["close"]
+
+        if trend_bull and score >= 60:
+            sl = entry - atr
+            tp = entry + ((entry - sl) * 1.5)
+            return {
+                "direction": "LONG",
+                "confidence": min(99, score),
+                "entry": float(entry),
+                "sl": float(sl),
+                "tp": float(tp)
+            }
+
+        if trend_bear and score >= 60:
+            sl = entry + atr
+            tp = entry - ((sl - entry) * 1.5)
+            return {
+                "direction": "SHORT",
+                "confidence": min(99, score),
+                "entry": float(entry),
+                "sl": float(sl),
+                "tp": float(tp)
+            }
+
+        return None
+
+    except Exception:
+        return None
