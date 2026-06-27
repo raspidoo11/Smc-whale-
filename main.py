@@ -163,4 +163,5 @@ while True:
         )
 
         time.sleep(30)
-if name == "main": main()
+if name == "main":
+main()
