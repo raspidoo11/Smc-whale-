@@ -14,22 +14,13 @@ async def execute_trade(signal):
         entry = signal["entry"]
         sl = signal["sl"]
 
-        # Get current balance
         balance_data = get_balance()
         total_balance = balance_data.get("balance", 100.0)
 
-        # Risk 5% of balance
         risk_amount = total_balance * 0.05
+        distance = abs(entry - sl) or (entry * 0.01)
 
-        # Distance to SL
-        distance = abs(entry - sl)
-        if distance <= 0:
-            distance = entry * 0.01  # fallback 1%
-
-        # Calculate base quantity (with 10x leverage)
-        qty = (risk_amount / distance) * 10  # 10x leverage
-
-        # Round to reasonable size
+        qty = (risk_amount / distance) * 10   # 10x leverage
         qty = round(qty, 6)
 
         side = "buy" if direction == "LONG" else "sell"
@@ -39,12 +30,34 @@ async def execute_trade(signal):
             type="market",
             side=side,
             amount=qty,
-            params={"leverage": 10}  # Set 10x leverage
+            params={"leverage": 10}
         )
 
-        logger.info(f"✅ EXECUTED {direction} {symbol} | Qty: {qty} | 5% risk | 10x lev")
+        logger.info(f"✅ EXECUTED {direction} {symbol} | Qty: {qty} | 5% risk")
         return order
 
     except Exception as e:
         logger.exception(f"Order failed: {e}")
+        return None
+
+
+async def close_position(symbol, direction):
+    """Close full position"""
+    try:
+        side = "sell" if direction == "LONG" else "buy"
+        positions = exchange.fetch_positions([symbol])
+        for pos in positions:
+            if pos['symbol'] == symbol and float(pos.get('contracts', 0)) > 0:
+                amount = float(pos['contracts'])
+                order = exchange.create_order(
+                    symbol=symbol,
+                    type="market",
+                    side=side,
+                    amount=amount
+                )
+                logger.info(f"Closed {direction} position on {symbol}")
+                return order
+        return None
+    except Exception as e:
+        logger.error(f"Close failed for {symbol}: {e}")
         return None
