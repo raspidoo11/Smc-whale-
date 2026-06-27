@@ -1,4 +1,4 @@
-import bybit
+import ccxt
 import logging
 import os
 
@@ -10,11 +10,33 @@ def get_exchange():
     api_secret = os.getenv("BYBIT_API_SECRET")
     mode = os.getenv("TRADE_MODE", "demo").lower()
 
-    if mode == "demo":
-        client = bybit.bybit(test=True, api_key=api_key, api_secret=api_secret)
-        logger.info("🚀 Using Bybit Testnet SDK")
-    else:
-        client = bybit.bybit(test=False, api_key=api_key, api_secret=api_secret)
-        logger.info("Using Bybit Live SDK")
+    config = {
+        "enableRateLimit": True,
+        "timeout": 30000,
+        "options": {
+            "defaultType": "swap",
+            "defaultSettle": "USDT",
+            "recvWindow": 10000
+        }
+    }
 
-    return client
+    if api_key and api_secret:
+        config["apiKey"] = api_key
+        config["secret"] = api_secret
+
+    if mode == "demo":
+        config["options"]["testnet"] = True
+        config["urls"] = {
+            'api': {
+                'public': 'https://api-testnet.bybit.com',
+                'private': 'https://api-testnet.bybit.com'
+            }
+        }
+        logger.info("🚀 Bybit Testnet")
+    else:
+        logger.info("Bybit Live")
+
+    exchange = ccxt.bybit(config)
+    exchange.load_markets()
+    logger.info(f"Loaded {len(exchange.markets)} markets")
+    return exchange
