@@ -1,8 +1,11 @@
 import pandas as pd
 import logging
+import os
 from xgboost_trainer import get_xgboost_probability
 
 logger = logging.getLogger(__name__)
+
+USE_XGBOOST = os.getenv("USE_XGBOOST", "false").lower() == "true"
 
 
 def calculate_features(df):
@@ -71,24 +74,26 @@ def get_signal(df_15m, df_5m):
 
         entry = latest["close"]
 
-        trade_features = {
-            'volume_spike': latest["volume_spike"],
-            'displacement': latest["displacement"],
-            'trend_bull': 1 if trend_bull else 0,
-            'sweep': 1 if (bull_sweep or bear_sweep) else 0,
-            'fvg': 1 if (bull_fvg or bear_fvg) else 0,
-            'atr': float(atr),
-            'qty': 1.0,
-            'risk_reward': 1.5
-        }
-        ai_prob = get_xgboost_probability(trade_features)
+        # XGBoost (only if enabled)
+        ai_prob = 50.0
+        if USE_XGBOOST:
+            trade_features = {
+                'volume_spike': latest["volume_spike"],
+                'displacement': latest["displacement"],
+                'trend_bull': 1 if trend_bull else 0,
+                'sweep': 1 if (bull_sweep or bear_sweep) else 0,
+                'fvg': 1 if (bull_fvg or bear_fvg) else 0,
+                'atr': float(atr),
+                'qty': 1.0,
+                'risk_reward': 1.5
+            }
+            ai_prob = get_xgboost_probability(trade_features)
 
         final_confidence = int(0.6 * score + 0.4 * ai_prob)
 
-        # Debug log - very useful
-        logger.info(f"Signal check | {entry} | trend_bull={trend_bull} | score={score} | ai={ai_prob} | final={final_confidence}")
+        logger.info(f"Signal check | trend_bull={trend_bull} | SMC_score={score} | AI={ai_prob} | Final={final_confidence} | XGBoost={'ON' if USE_XGBOOST else 'OFF'}")
 
-        if trend_bull and final_confidence >= 55:   # Temporarily lowered
+        if trend_bull and final_confidence >= 55:
             sl = entry - atr
             tp = entry + (entry - sl) * 1.5
             return {
