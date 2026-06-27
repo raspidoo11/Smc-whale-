@@ -89,3 +89,30 @@ def close_trade(symbol, exit_price, result):
             remaining.append(trade)
 
     if closed_trade:
+        history.append(closed_trade)
+        save_trade_history(history)
+
+    save_open_trades(remaining)
+    return closed_trade
+
+
+def update_balance(pnl):
+    data = get_balance()
+    data["balance"] += pnl
+    data["daily_pnl"] += pnl
+    if data["daily_pnl"] > data["peak_daily_pnl"]:
+        data["peak_daily_pnl"] = data["daily_pnl"]
+    save_balance(data)
+    logger.info(f"Balance updated: ${data['balance']:.2f}")
+    return data
+
+
+def trading_allowed():
+    if os.getenv("DAILY_PROTECTION", "true").lower() == "false":
+        return True
+
+    data = get_balance()
+    if data["peak_daily_pnl"] >= 10 and data["daily_pnl"] <= 10:
+        logger.info("Daily target protected.")
+        return False
+    return True
