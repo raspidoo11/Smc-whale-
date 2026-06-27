@@ -1,5 +1,5 @@
 import pandas as pd
-
+from xgboost_trainer import get_xgboost_probability
 
 def calculate_features(df):
     df = df.copy()
@@ -39,7 +39,6 @@ def get_signal(df_15m, df_5m):
         if pd.isna(atr) or atr <= 0:
             return None
 
-        # Additional confluences
         bull_sweep = (
             latest["low"] < df_5m["low"].iloc[-10:-1].min()
             and latest["close"] > latest["open"]
@@ -68,29 +67,48 @@ def get_signal(df_15m, df_5m):
 
         entry = latest["close"]
 
-        if trend_bull and score >= 60:
+        # XGBoost AI Probability
+        trade_features = {
+            'volume_spike': latest["volume_spike"],
+            'displacement': latest["displacement"],
+            'trend_bull': 1 if trend_bull else 0,
+            'sweep': 1 if (bull_sweep or bear_sweep) else 0,
+            'fvg': 1 if (bull_fvg or bear_fvg) else 0,
+            'atr': float(atr),
+            'qty': 1.0,  # placeholder
+            'risk_reward': 1.5
+        }
+        ai_prob = get_xgboost_probability(trade_features)
+
+        # Final Confidence = 60% SMC + 40% AI
+        final_confidence = int(0.6 * score + 0.4 * ai_prob)
+
+        if trend_bull and final_confidence >= 60:
             sl = entry - atr
             tp = entry + (entry - sl) * 1.5
             return {
                 "direction": "LONG",
-                "confidence": min(99, score),
+                "confidence": final_confidence,
                 "entry": float(entry),
                 "sl": float(sl),
-                "tp": float(tp)
+                "tp": float(tp),
+                "ai_prob": ai_prob
             }
 
-        if trend_bear and score >= 60:
+        if trend_bear and final_confidence >= 60:
             sl = entry + atr
             tp = entry - (sl - entry) * 1.5
             return {
                 "direction": "SHORT",
-                "confidence": min(99, score),
+                "confidence": final_confidence,
                 "entry": float(entry),
                 "sl": float(sl),
-                "tp": float(tp)
+                "tp": float(tp),
+                "ai_prob": ai_prob
             }
 
         return None
 
-    except Exception:
+    except Exception as e:
+        logger.exception(f"Signal generation error: {e}")
         return None
