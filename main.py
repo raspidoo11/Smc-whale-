@@ -1,25 +1,9 @@
-import asyncio
-import schedule
-import time
-import logging
-
-from scanner import get_top_symbols, get_ohlcv
-from strategy import get_signal
-from paper_trader import calculate_qty
-from exchange import get_exchange
-from telegram_alerts import send_alert
-
-logging.basicConfig(
-level=logging.INFO,
-format="%(asctime)s | %(levelname)s | %(message)s"
-)
-
-logger = logging.getLogger(__name__)
-
+import asyncio import schedule import time import logging
+from scanner import get_top_symbols, get_ohlcv from strategy import get_signal from paper_trader import calculate_qty from exchange import get_exchange from telegram_alerts import send_alert
+logging.basicConfig( level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s" )
+logger = logging.getLogger(name)
 exchange = get_exchange()
-
 async def scan():
-
 try:
 
     logger.info("Starting scan...")
@@ -119,20 +103,13 @@ except Exception as e:
     logger.exception(
         f"SCAN FAILED: {e}"
     )
-
 async def startup():
-
 await send_alert(
     "🚀 SMC Whale AI Started"
 )
-
 def heartbeat():
-
 logger.info("Worker Alive")
-
-
 def run_scan():
-
 try:
 
     asyncio.run(scan())
@@ -142,9 +119,7 @@ except Exception as e:
     logger.exception(
         f"Scheduled scan failed: {e}"
     )
-
 def main():
-    
 logger.info(
     "🚀 Starting SMC Whale AI"
 )
@@ -180,6 +155,4 @@ while True:
         )
 
         time.sleep(30)
-
-if __name__ == "__main__":
-main()
+if name == "main": main()
