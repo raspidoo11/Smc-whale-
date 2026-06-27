@@ -12,7 +12,6 @@ from trade_manager import add_trade, trading_allowed
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model
 from trade_manager import get_trade_history
-from demo_executor import execute_trade
 
 logging.basicConfig(
     level=logging.INFO,
@@ -65,36 +64,27 @@ async def scan():
         results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         top3 = results[:3]
 
-        logger.info(f"Processing top {len(top3)} signals...")
-
         for trade in top3:
-            order = await execute_trade(trade)
+            add_trade({
+                "symbol": trade["symbol"],
+                "direction": trade["direction"],
+                "entry": trade["entry"],
+                "sl": trade["sl"],
+                "tp": trade["tp"],
+                "qty": trade["qty"],
+                "status": "OPEN"
+            })
 
-            if order:
-                add_trade({
-                    "symbol": trade["symbol"],
-                    "direction": trade["direction"],
-                    "entry": trade["entry"],
-                    "sl": trade["sl"],
-                    "tp": trade["tp"],
-                    "qty": trade["qty"],
-                    "status": "OPEN",
-                    "order_id": order.get("id")
-                })
-
-                await send_alert(
-                    f"🚀 DEMO TRADE EXECUTED\n\n"
-                    f"{trade['symbol']}\n"
-                    f"Direction: {trade['direction']}\n"
-                    f"Entry: {trade['entry']:.4f}\n"
-                    f"SL: {trade['sl']:.4f}\n"
-                    f"TP: {trade['tp']:.4f}\n"
-                    f"Qty: {trade['qty']}\n"
-                    f"Confidence: {trade.get('confidence', 0)}%"
-                )
-                logger.info(f"TRADE SENT: {trade['symbol']} {trade['direction']}")
-            else:
-                logger.warning(f"Trade execution FAILED for {trade['symbol']}")
+            await send_alert(
+                f"📈 PAPER TRADE\n\n"
+                f"{trade['symbol']}\n"
+                f"Direction: {trade['direction']}\n"
+                f"Entry: {trade['entry']:.4f}\n"
+                f"SL: {trade['sl']:.4f}\n"
+                f"TP: {trade['tp']:.4f}\n"
+                f"Qty: {trade['qty']}\n"
+                f"Confidence: {trade.get('confidence', 0)}%"
+            )
 
         if len(get_trade_history()) >= 10:
             train_model()
@@ -111,9 +101,8 @@ async def run_monitor():
 
 
 async def startup():
-    await send_alert("🚀 SMC Whale AI Started (Demo Mode)")
-    from demo_executor import test_connection
-    await test_connection()
+    await send_alert("🚀 SMC Whale AI Started (Paper Mode)")
+
 
 def heartbeat():
     logger.info("Worker Alive")
@@ -128,7 +117,7 @@ def run_monitor_sync():
 
 
 def main():
-    logger.info("🚀 Starting SMC Whale AI - DEMO Mode")
+    logger.info("🚀 Starting SMC Whale AI - PAPER Mode")
 
     asyncio.run(startup())
     run_scan_sync()
