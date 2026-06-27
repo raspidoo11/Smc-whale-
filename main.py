@@ -90,6 +90,11 @@ async def scan():
         )
 
         top3 = results[:3]
+        if not trading_allowed():
+            logger.info(
+                "Daily target reached. Trading paused."
+            )
+            return
 
         logger.info(
             f"Sending {len(top3)} Telegram alerts"
