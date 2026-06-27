@@ -14,10 +14,8 @@ format="%(asctime)s | %(levelname)s | %(message)s"
 logger = logging.getLogger(name)
 exchange = get_exchange()
 async def scan():
-   try:
-
-    logger.info("Starting scan...")
-
+try:
+logger.info("Starting scan...")
     symbols = get_top_symbols(20)
 
     logger.info(f"Found {len(symbols)} symbols")
@@ -25,38 +23,19 @@ async def scan():
     results = []
 
     for symbol in symbols:
-
         try:
-
             logger.info(f"Scanning {symbol}")
 
-            df_15m = get_ohlcv(
-                symbol,
-                "15m",
-                200
-            )
-
-            df_5m = get_ohlcv(
-                symbol,
-                "5m",
-                200
-            )
+            df_15m = get_ohlcv(symbol, "15m", 200)
+            df_5m = get_ohlcv(symbol, "5m", 200)
 
             if df_15m is None or df_5m is None:
-
-                logger.warning(
-                    f"{symbol} returned no data"
-                )
-
+                logger.warning(f"{symbol} returned no data")
                 continue
 
-            signal = get_signal(
-                df_15m,
-                df_5m
-            )
+            signal = get_signal(df_15m, df_5m)
 
             if signal:
-
                 qty = calculate_qty(
                     signal["entry"],
                     signal["sl"]
@@ -76,7 +55,6 @@ async def scan():
                 })
 
         except Exception as e:
-
             logger.exception(
                 f"Symbol failed: {symbol} | {e}"
             )
@@ -97,7 +75,6 @@ async def scan():
     )
 
     for trade in top3:
-
         await send_alert(
             f"📈 {trade['symbol']}\n\n"
             f"Direction: {trade['direction']}\n"
@@ -109,31 +86,24 @@ async def scan():
         )
 
 except Exception as e:
-
-    logger.exception(
-        f"SCAN FAILED: {e}"
-    )
+    logger.exception(f"SCAN FAILED: {e}")
 async def startup():
 await send_alert(
-    "🚀 SMC Whale AI Started"
+"🚀 SMC Whale AI Started"
 )
 def heartbeat():
 logger.info("Worker Alive")
 def run_scan():
 try:
-
-    asyncio.run(scan())
-
+asyncio.run(scan())
 except Exception as e:
-
-    logger.exception(
-        f"Scheduled scan failed: {e}"
-    )
+logger.exception(
+f"Scheduled scan failed: {e}"
+)
 def main():
 logger.info(
-    "🚀 Starting SMC Whale AI"
+"🚀 Starting SMC Whale AI"
 )
-
 asyncio.run(startup())
 
 logger.info(
@@ -151,15 +121,11 @@ schedule.every(5).minutes.do(
 )
 
 while True:
-
     try:
-
         schedule.run_pending()
-
         time.sleep(5)
 
     except Exception as e:
-
         logger.exception(
             f"Main loop error: {e}"
         )
