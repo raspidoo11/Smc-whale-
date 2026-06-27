@@ -111,39 +111,4 @@ async def scan():
                 "entry": trade["entry"],
                 "sl": trade["sl"],
                 "tp": trade["tp"],
-                "qty": trade["qty"],
-                "status": "OPEN"
-            })
-
-            # Send Telegram alert
-            await send_alert(
-                f"📈 {trade['symbol']}\n\n"
-                f"Direction: {trade['direction']}\n"
-                f"Entry: {trade['entry']:.4f}\n"
-                f"SL: {trade['sl']:.4f}\n"
-                f"TP: {trade['tp']:.4f}\n"
-                f"Qty: {trade['qty']}\n"
-                f"Confidence: {trade['confidence']}%"
-            )
-
-    except Exception as e:
-        logger.exception(
-            f"SCAN FAILED: {e}"
-        )
-
-
-async def startup():
-    await send_alert(
-        "🚀 SMC Whale AI Started"
-    )
-
-
-def heartbeat():
-    logger.info("Worker Alive")
-
-
-def run_scan():
-    try:
-        asyncio.run(scan())
-    except Exception as e:
-        logger.exception(
+                "qty": trade["
