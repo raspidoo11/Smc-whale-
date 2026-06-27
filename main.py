@@ -1,6 +1,14 @@
 import asyncio
 import schedule
 import time
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s"
+)
+
+logger = logging.getLogger(__name__)
 from scanner import get_top_symbols, get_ohlcv
 from strategy import get_signal
 
