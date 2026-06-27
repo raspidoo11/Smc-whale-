@@ -1,4 +1,5 @@
 import logging
+import os
 from exchange import get_exchange
 from trade_manager import get_balance
 
@@ -6,8 +7,22 @@ logger = logging.getLogger(__name__)
 exchange = get_exchange()
 
 
+async def test_connection():
+    """Test Bybit API connection"""
+    try:
+        balance = exchange.fetch_balance()
+        logger.info(f"✅ API Connection OK | Balance: {balance.get('total', {}).get('USDT', 'N/A')} USDT")
+        return True
+    except Exception as e:
+        logger.error(f"❌ API Connection FAILED: {e}")
+        return False
+
+
 async def execute_trade(signal):
-    """Place market order using max 5% of balance + 10x leverage"""
+    if os.getenv("EXECUTE_TRADES", "false").lower() != "true":
+        logger.info("Execution disabled. Would have executed trade.")
+        return {"id": "paper_order"}
+
     try:
         symbol = signal["symbol"]
         direction = signal["direction"]
@@ -20,7 +35,7 @@ async def execute_trade(signal):
         risk_amount = total_balance * 0.05
         distance = abs(entry - sl) or (entry * 0.01)
 
-        qty = (risk_amount / distance) * 10   # 10x leverage
+        qty = (risk_amount / distance) * 10
         qty = round(qty, 6)
 
         side = "buy" if direction == "LONG" else "sell"
@@ -33,7 +48,7 @@ async def execute_trade(signal):
             params={"leverage": 10}
         )
 
-        logger.info(f"✅ EXECUTED {direction} {symbol} | Qty: {qty} | 5% risk")
+        logger.info(f"✅ EXECUTED {direction} {symbol} | Qty: {qty}")
         return order
 
     except Exception as e:
@@ -42,7 +57,10 @@ async def execute_trade(signal):
 
 
 async def close_position(symbol, direction):
-    """Close full position"""
+    if os.getenv("EXECUTE_TRADES", "false").lower() != "true":
+        logger.info("Execution disabled. Would have closed position.")
+        return True
+
     try:
         side = "sell" if direction == "LONG" else "buy"
         positions = exchange.fetch_positions([symbol])
