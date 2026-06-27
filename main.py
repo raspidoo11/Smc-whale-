@@ -12,6 +12,7 @@ from trade_manager import add_trade, trading_allowed
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model
 from trade_manager import get_trade_history
+from demo_executor import execute_trade   # ← New import
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,7 +23,8 @@ exchange = get_exchange()
 
 
 async def scan():
-    """Main signal scanning + new trade alerts"""
+    await monitor_trades()   # Fast monitoring
+
     try:
         logger.info("Starting signal scan...")
 
@@ -43,7 +45,6 @@ async def scan():
                 df_5m = get_ohlcv(symbol, "5m", 200)
 
                 if df_15m is None or df_5m is None:
-                    logger.warning(f"{symbol} returned no data")
                     continue
 
                 signal = get_signal(df_15m, df_5m)
@@ -51,47 +52,41 @@ async def scan():
                 if signal:
                     qty = calculate_qty(signal["entry"], signal["sl"])
                     signal["qty"] = qty
-
-                    logger.info(
-                        f"SIGNAL {symbol} {signal['direction']} {signal.get('confidence', 0)}%"
-                    )
-
-                    results.append({
-                        "symbol": symbol,
-                        **signal
-                    })
+                    results.append({"symbol": symbol, **signal})
 
             except Exception as e:
                 logger.exception(f"Symbol failed: {symbol} | {e}")
-
-        logger.info(f"Scan complete. Signals found: {len(results)}")
 
         results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         top3 = results[:3]
 
         for trade in top3:
-            add_trade({
-                "symbol": trade["symbol"],
-                "direction": trade["direction"],
-                "entry": trade["entry"],
-                "sl": trade["sl"],
-                "tp": trade["tp"],
-                "qty": trade["qty"],
-                "status": "OPEN"
-            })
+            # Execute real demo trade
+            order = await execute_trade(trade)
 
-            await send_alert(
-                f"📈 NEW PAPER TRADE\n\n"
-                f"{trade['symbol']}\n"
-                f"Direction: {trade['direction']}\n"
-                f"Entry: {trade['entry']:.4f}\n"
-                f"SL: {trade['sl']:.4f}\n"
-                f"TP: {trade['tp']:.4f}\n"
-                f"Qty: {trade['qty']}\n"
-                f"Confidence: {trade.get('confidence', 0)}%"
-            )
+            if order:
+                add_trade({
+                    "symbol": trade["symbol"],
+                    "direction": trade["direction"],
+                    "entry": trade["entry"],
+                    "sl": trade["sl"],
+                    "tp": trade["tp"],
+                    "qty": trade["qty"],
+                    "status": "OPEN",
+                    "order_id": order.get("id")
+                })
 
-        # Retrain XGBoost if enough data
+                await send_alert(
+                    f"🚀 DEMO TRADE EXECUTED\n\n"
+                    f"{trade['symbol']}\n"
+                    f"Direction: {trade['direction']}\n"
+                    f"Entry: {trade['entry']:.4f}\n"
+                    f"SL: {trade['sl']:.4f}\n"
+                    f"TP: {trade['tp']:.4f}\n"
+                    f"Qty: {trade['qty']}\n"
+                    f"Confidence: {trade.get('confidence', 0)}%"
+                )
+
         if len(get_trade_history()) >= 10:
             train_model()
 
@@ -99,8 +94,9 @@ async def scan():
         logger.exception(f"SCAN FAILED: {e}")
 
 
+# ... (the rest of the file remains the same as previous version with fast monitoring)
+
 async def run_monitor():
-    """Fast monitoring loop for open trades"""
     try:
         await monitor_trades()
     except Exception as e:
@@ -108,7 +104,7 @@ async def run_monitor():
 
 
 async def startup():
-    await send_alert("🚀 SMC Whale AI Started")
+    await send_alert("🚀 SMC Whale AI Started (Demo Mode)")
 
 
 def heartbeat():
@@ -124,21 +120,15 @@ def run_monitor_sync():
 
 
 def main():
-    logger.info("🚀 Starting SMC Whale AI")
+    logger.info("🚀 Starting SMC Whale AI - DEMO Mode")
 
     asyncio.run(startup())
-    logger.info("Running initial scan + monitor")
     run_scan_sync()
     run_monitor_sync()
 
-    # Heartbeat every minute
     schedule.every(1).minutes.do(heartbeat)
-
-    # Fast monitoring every 45 seconds (syncs much better with live price)
-    schedule.every(45).seconds.do(run_monitor_sync)
-
-    # Signal scanning every 2 minutes
-    schedule.every(2).minutes.do(run_scan_sync)
+    schedule.every(45).seconds.do(run_monitor_sync)   # Fast monitoring
+    schedule.every(2).minutes.do(run_scan_sync)       # Signals
 
     while True:
         try:
