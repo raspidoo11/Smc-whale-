@@ -2,6 +2,7 @@ import asyncio
 import schedule
 import time
 import logging
+
 from scanner import get_top_symbols, get_ohlcv
 from strategy import get_signal
 from paper_trader import calculate_qty
@@ -18,6 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 exchange = get_exchange()
+
 
 async def scan():
     try:
@@ -90,6 +92,7 @@ async def scan():
         )
 
         top3 = results[:3]
+
         if not trading_allowed():
             logger.info(
                 "Daily target reached. Trading paused."
@@ -101,6 +104,18 @@ async def scan():
         )
 
         for trade in top3:
+            # Record the trade in our paper trading system
+            add_trade({
+                "symbol": trade["symbol"],
+                "direction": trade["direction"],
+                "entry": trade["entry"],
+                "sl": trade["sl"],
+                "tp": trade["tp"],
+                "qty": trade["qty"],
+                "status": "OPEN"
+            })
+
+            # Send Telegram alert
             await send_alert(
                 f"📈 {trade['symbol']}\n\n"
                 f"Direction: {trade['direction']}\n"
@@ -132,41 +147,3 @@ def run_scan():
         asyncio.run(scan())
     except Exception as e:
         logger.exception(
-            f"Scheduled scan failed: {e}"
-        )
-
-
-def main():
-    logger.info(
-        "🚀 Starting SMC Whale AI"
-    )
-
-    asyncio.run(startup())
-
-    logger.info(
-        "Running initial scan"
-    )
-
-    run_scan()
-
-    schedule.every(1).minutes.do(
-        heartbeat
-    )
-
-    schedule.every(5).minutes.do(
-        run_scan
-    )
-
-    while True:
-        try:
-            schedule.run_pending()
-            time.sleep(5)
-        except Exception as e:
-            logger.exception(
-                f"Main loop error: {e}"
-            )
-            time.sleep(30)
-
-
-if __name__ == "__main__":
-    main()
