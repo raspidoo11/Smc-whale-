@@ -13,19 +13,14 @@ def get_top_symbols(limit=20):
 
         markets = exchange.fetch_markets()
 
-        perps = []
+        perps = [
+            market for market in markets
+            if market.get("swap")
+            and market.get("quote") == "USDT"
+            and market.get("active")
+        ]
 
-        for market in markets:
-            if (
-                market.get("swap")
-                and market.get("quote") == "USDT"
-                and market.get("active")
-            ):
-                perps.append(market)
-
-        logger.info(
-            f"Found {len(perps)} active USDT perpetuals"
-        )
+        logger.info(f"Found {len(perps)} active USDT perpetuals")
 
         perps.sort(
             key=lambda x: float(
@@ -36,22 +31,13 @@ def get_top_symbols(limit=20):
             reverse=True
         )
 
-        symbols = [
-            x["symbol"]
-            for x in perps[:limit]
-        ]
+        symbols = [x["symbol"] for x in perps[:limit]]
 
-        logger.info(
-            f"Selected top {len(symbols)} symbols"
-        )
-
+        logger.info(f"Selected top {len(symbols)} symbols")
         return symbols
 
     except Exception as e:
-        logger.exception(
-            f"Top Symbol Error: {e}"
-        )
-
+        logger.exception(f"Top Symbol Error: {e}")
         return [
             "BTC/USDT:USDT",
             "ETH/USDT:USDT",
@@ -61,11 +47,7 @@ def get_top_symbols(limit=20):
         ]
 
 
-def get_ohlcv(
-    symbol,
-    timeframe,
-    limit=200
-):
+def get_ohlcv(symbol, timeframe, limit=200):
     try:
         candles = exchange.fetch_ohlcv(
             symbol,
@@ -74,46 +56,24 @@ def get_ohlcv(
         )
 
         if not candles:
-            logger.warning(
-                f"{symbol} returned no candles"
-            )
+            logger.warning(f"{symbol} returned no candles")
             return None
 
         df = pd.DataFrame(
             candles,
-            columns=[
-                "timestamp",
-                "open",
-                "high",
-                "low",
-                "close",
-                "volume"
-            ]
+            columns=["timestamp", "open", "high", "low", "close", "volume"]
         )
 
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"],
-            unit="ms"
-        )
-
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
         df = df.dropna()
 
         if len(df) < 50:
-            logger.warning(
-                f"{symbol} only returned "
-                f"{len(df)} candles"
-            )
+            logger.warning(f"{symbol} only returned {len(df)} candles")
             return None
 
-        logger.info(
-            f"{symbol} {timeframe} "
-            f"candles loaded: {len(df)}"
-        )
-
+        logger.info(f"{symbol} {timeframe} candles loaded: {len(df)}")
         return df
 
     except Exception as e:
-        logger.exception(
-            f"{symbol} OHLCV Error: {e}"
-        )
+        logger.exception(f"{symbol} OHLCV Error: {e}")
         return None
