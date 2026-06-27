@@ -26,19 +26,23 @@ def get_exchange():
 
     if mode == "demo":
         config["options"]["testnet"] = True
-        # Explicit Testnet URLs
+        # Explicit Testnet URLs as per Bybit docs
         config["urls"] = {
             'api': {
                 'public': 'https://api-testnet.bybit.com',
                 'private': 'https://api-testnet.bybit.com'
             }
         }
-        logger.info("🚀 Using Bybit Testnet (https://api-testnet.bybit.com)")
+        logger.info("🚀 Bybit Testnet (https://api-testnet.bybit.com)")
     else:
-        logger.info("Using Bybit Live")
+        logger.info("Bybit Live")
 
     exchange = ccxt.bybit(config)
-    exchange.load_markets()
 
-    logger.info(f"Loaded {len(exchange.markets)} markets")
+    try:
+        exchange.load_markets()
+        logger.info(f"✅ Loaded {len(exchange.markets)} markets")
+    except Exception as e:
+        logger.error(f"Failed to load markets: {e}")
+
     return exchange
