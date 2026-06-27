@@ -10,6 +10,8 @@ from exchange import get_exchange
 from telegram_alerts import send_alert
 from trade_manager import add_trade, trading_allowed
 from trade_monitor import monitor_trades
+from xgboost_trainer import train_model
+from trade_manager import get_trade_history  # for training check
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,7 +22,7 @@ exchange = get_exchange()
 
 
 async def scan():
-    # Monitor existing open trades first
+    # 1. Monitor existing open trades first
     await monitor_trades()
 
     try:
@@ -53,7 +55,7 @@ async def scan():
                     signal["qty"] = qty
 
                     logger.info(
-                        f"SIGNAL {symbol} {signal['direction']} {signal['confidence']}%"
+                        f"SIGNAL {symbol} {signal['direction']} {signal.get('confidence', 0)}%"
                     )
 
                     results.append({
@@ -66,7 +68,7 @@ async def scan():
 
         logger.info(f"Scan complete. Signals found: {len(results)}")
 
-        results.sort(key=lambda x: x["confidence"], reverse=True)
+        results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         top3 = results[:3]
 
         logger.info(f"Sending {len(top3)} new paper trades")
@@ -90,8 +92,12 @@ async def scan():
                 f"SL: {trade['sl']:.4f}\n"
                 f"TP: {trade['tp']:.4f}\n"
                 f"Qty: {trade['qty']}\n"
-                f"Confidence: {trade['confidence']}%"
+                f"Confidence: {trade.get('confidence', 0)}%"
             )
+
+        # Train XGBoost model if we have enough closed trades
+        if len(get_trade_history()) >= 10:
+            train_model()
 
     except Exception as e:
         logger.exception(f"SCAN FAILED: {e}")
