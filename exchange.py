@@ -15,7 +15,8 @@ def get_exchange():
         "timeout": 30000,
         "options": {
             "defaultType": "swap",
-            "defaultSettle": "USDT"
+            "defaultSettle": "USDT",
+            "recvWindow": 10000   # Helps with timing issues
         }
     }
 
@@ -25,13 +26,11 @@ def get_exchange():
 
     if mode == "demo":
         config["options"]["testnet"] = True
-        logger.info("🚀 Connected to Bybit DEMO (Testnet)")
+        logger.info("🚀 Bybit Testnet (Demo) V5")
     else:
-        logger.info("⚠️ Connected to Bybit LIVE")
+        logger.info("Bybit Live V5")
 
     exchange = ccxt.bybit(config)
-
-    # Important: Load markets after setting credentials
     exchange.load_markets()
 
     logger.info(f"Loaded {len(exchange.markets)} markets")
