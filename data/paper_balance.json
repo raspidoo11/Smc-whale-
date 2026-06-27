@@ -1,5 +1,4 @@
 {
-  "balance": 100,
-  "daily_profit": 0,
-  "peak_profit": 0
+  "balance": 100.0,
+  "daily_pnl": 0.0
 }
