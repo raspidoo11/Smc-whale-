@@ -33,14 +33,18 @@ def save_json(file_path, data):
 
 
 def get_balance():
-    data = load_json(
-        BALANCE_FILE,
-        {
-            "balance": 100.0,
-            "daily_pnl": 0.0,
-            "peak_daily_pnl": 0.0
-        }
-    )
+    default = {
+        "balance": 100.0,
+        "daily_pnl": 0.0,
+        "peak_daily_pnl": 0.0
+    }
+    data = load_json(BALANCE_FILE, default)
+    
+    # Ensure all keys exist (for backward compatibility)
+    for key, value in default.items():
+        if key not in data:
+            data[key] = value
+    
     return data
 
 
