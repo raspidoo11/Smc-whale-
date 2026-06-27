@@ -14,7 +14,7 @@ format="%(asctime)s | %(levelname)s | %(message)s"
 logger = logging.getLogger(name)
 exchange = get_exchange()
 async def scan():
-try:
+   try:
 
     logger.info("Starting scan...")
 
