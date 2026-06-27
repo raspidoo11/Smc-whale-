@@ -50,6 +50,14 @@ def save_open_trades(trades):
     save_json(OPEN_TRADES_FILE, trades)
 
 
+def get_trade_history():
+    return load_json(HISTORY_FILE, [])
+
+
+def save_trade_history(history):
+    save_json(HISTORY_FILE, history)
+
+
 def risk_amount():
     data = get_balance()
     return data.get("balance", 100.0) * 0.01
@@ -81,35 +89,3 @@ def close_trade(symbol, exit_price, result):
             remaining.append(trade)
 
     if closed_trade:
-        history.append(closed_trade)
-        save_trade_history(history)
-
-    save_open_trades(remaining)
-    return closed_trade
-
-
-def get_trade_history():
-    return load_json(HISTORY_FILE, [])
-
-
-def save_trade_history(history):
-    save_json(HISTORY_FILE, history)
-
-
-def update_balance(pnl):
-    data = get_balance()
-    data["balance"] += pnl
-    data["daily_pnl"] += pnl
-    if data["daily_pnl"] > data["peak_daily_pnl"]:
-        data["peak_daily_pnl"] = data["daily_pnl"]
-    save_balance(data)
-    logger.info(f"Balance updated: ${data['balance']:.2f}")
-    return data
-
-
-def trading_allowed():
-    data = get_balance()
-    if data["peak_daily_pnl"] >= 10 and data["daily_pnl"] <= 10:
-        logger.info("Daily target protected.")
-        return False
-    return True
