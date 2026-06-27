@@ -19,29 +19,44 @@ exchange = get_exchange()
 
 async def scan():
 
+    logger.info("Starting scan...")
+
     symbols = get_top_symbols(20)
+
+    logger.info(f"Found {len(symbols)} symbols")
 
     results = []
 
     for symbol in symbols:
 
-        df = get_ohlcv(
-            symbol,
-            "5m",
-            200
-        )
+        logger.info(f"Scanning {symbol}")
+
+        df = get_ohlcv(symbol, "5m", 200)
 
         if df is None:
+
+            logger.warning(f"{symbol} returned no data")
+
             continue
 
         signal = get_signal(df)
 
         if signal:
 
+            logger.info(
+                f"SIGNAL {symbol} "
+                f"{signal['direction']} "
+                f"{signal['confidence']}%"
+            )
+
             results.append({
                 "symbol": symbol,
                 **signal
             })
+
+    logger.info(
+        f"Scan complete. Signals found: {len(results)}"
+    )
 
     results.sort(
         key=lambda x: x["confidence"],
@@ -50,15 +65,16 @@ async def scan():
 
     top3 = results[:3]
 
+    logger.info(
+        f"Sending {len(top3)} Telegram alerts"
+    )
+
     for trade in top3:
 
         await send_alert(
-            f"""
-{trade['symbol']}
-{trade['direction']}
-
-Confidence: {trade['confidence']}%
-"""
+            f"{trade['symbol']}\n"
+            f"{trade['direction']}\n"
+            f"Confidence: {trade['confidence']}%"
         )
 
 async def startup():
@@ -75,6 +91,10 @@ def main():
 
     asyncio.run(startup())
 
+    logger.info("Running initial scan")
+
+    asyncio.run(scan())
+
     schedule.every(1).minutes.do(heartbeat)
 
     schedule.every(5).minutes.do(
@@ -86,6 +106,3 @@ def main():
         schedule.run_pending()
 
         time.sleep(5)
-
-if __name__ == "__main__":
-    main()
