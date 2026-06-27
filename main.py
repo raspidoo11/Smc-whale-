@@ -7,6 +7,10 @@ from strategy import get_signal
 from paper_trader import calculate_qty
 from exchange import get_exchange
 from telegram_alerts import send_alert
+from trade_manager import (
+    add_trade,
+    trading_allowed
+)
 
 logging.basicConfig(
     level=logging.INFO,
