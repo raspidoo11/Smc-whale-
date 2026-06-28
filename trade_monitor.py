@@ -22,7 +22,8 @@ async def monitor_trades():
 
     logger.info(f"Monitoring {len(trades)} open paper trades...")
 
-    for trade in trades[:]:
+    for i in range(len(trades) - 1, -1, -1):  # Reverse loop to avoid index issues
+        trade = trades[i]
         if trade.get("status") != "OPEN":
             continue
 
@@ -75,7 +76,5 @@ async def monitor_trades():
 """
             )
             continue
-
-        # Break-Even and Trailing Stop (only if not hit)
 
     save_open_trades(trades)
