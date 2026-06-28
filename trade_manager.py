@@ -63,6 +63,23 @@ def risk_amount():
     return data.get("balance", 100.0) * 0.01
 
 
+def trade_exists(symbol):
+    trades = get_open_trades()
+    for trade in trades:
+        if (
+            trade["symbol"] == symbol
+            and trade["status"] == "OPEN"
+        ):
+            return True
+    return False
+
+
+def next_trade_number():
+    history = get_trade_history()
+    open_trades = get_open_trades()
+    return len(history) + len(open_trades) + 1
+
+
 def add_trade(trade):
     trades = get_open_trades()
     trades.append(trade)
