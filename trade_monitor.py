@@ -44,7 +44,6 @@ async def monitor_trades():
         qty = float(trade.get("qty", 1))
         direction = trade["direction"]
         
-        # FIXED: Use trade_no from trade dict, fallback to index if not present
         trade_no = trade.get("trade_no", idx + 1)
         
         current_price = await get_current_price(symbol)
@@ -64,10 +63,9 @@ async def monitor_trades():
                     modified = True
                     
                     await send_alert(
-                        f"🟡 #{trade_no}\n\n"
-                        f"{symbol}\n\n"
-                        f"BE ACTIVE\n"
-                        f"SL → ENTRY"
+                        f"🟡 <b>#{trade_no} - Break Even Activated</b>\n\n"
+                        f"<b>{symbol}</b>\n\n"
+                        f"🛑 Stop Loss moved to Entry: <b>${entry:.6f}</b>"
                     )
             else:  # SHORT
                 halfway = entry - ((entry - tp) * 0.5)
@@ -78,10 +76,9 @@ async def monitor_trades():
                     modified = True
                     
                     await send_alert(
-                        f"🟡 #{trade_no}\n\n"
-                        f"{symbol}\n\n"
-                        f"BE ACTIVE\n"
-                        f"SL → ENTRY"
+                        f"🟡 <b>#{trade_no} - Break Even Activated</b>\n\n"
+                        f"<b>{symbol}</b>\n\n"
+                        f"🛑 Stop Loss moved to Entry: <b>${entry:.6f}</b>"
                     )
         
         # ===== TRAILING ACTIVATION =====
@@ -94,9 +91,9 @@ async def monitor_trades():
                     modified = True
                     
                     await send_alert(
-                        f"🚀 #{trade_no}\n\n"
-                        f"{symbol}\n\n"
-                        f"TRAILING ACTIVE"
+                        f"🚀 <b>#{trade_no} - Trailing Stop Activated</b>\n\n"
+                        f"<b>{symbol}</b>\n\n"
+                        f"Now following price upward at 0.5% trail"
                     )
             else:  # SHORT
                 trigger = entry - ((entry - tp) * 0.75)
@@ -106,9 +103,9 @@ async def monitor_trades():
                     modified = True
                     
                     await send_alert(
-                        f"🚀 #{trade_no}\n\n"
-                        f"{symbol}\n\n"
-                        f"TRAILING ACTIVE"
+                        f"🚀 <b>#{trade_no} - Trailing Stop Activated</b>\n\n"
+                        f"<b>{symbol}</b>\n\n"
+                        f"Now following price downward at 0.5% trail"
                     )
         
         # ===== MOVE TRAILING SL =====
@@ -120,7 +117,7 @@ async def monitor_trades():
                     old_sl = trade["sl"]
                     trade["sl"] = new_sl
                     modified = True
-                    logger.info(f"TRAIL UPDATE: {symbol} SL {old_sl:.6f} → {new_sl:.6f}")
+                    logger.info(f"TRAIL UPDATE: {symbol} SL ${old_sl:.6f} → ${new_sl:.6f}")
             
             else:  # SHORT
                 new_sl = current_price * 1.005  # 0.5% trail
@@ -129,7 +126,7 @@ async def monitor_trades():
                     old_sl = trade["sl"]
                     trade["sl"] = new_sl
                     modified = True
-                    logger.info(f"TRAIL UPDATE: {symbol} SL {old_sl:.6f} → {new_sl:.6f}")
+                    logger.info(f"TRAIL UPDATE: {symbol} SL ${old_sl:.6f} → ${new_sl:.6f}")
         
         # ===== CHECK TP / SL HIT =====
         sl = float(trade["sl"])  # Re-read in case it was updated
@@ -153,19 +150,19 @@ async def monitor_trades():
             
             balance = get_balance()["balance"]
             
-            # FIXED: Better alert formatting with emoji and details
+            # IMPROVED: Better formatted exit alert with text labels
             status_emoji = "✅" if hit_tp else "❌"
+            exit_type = "Take Profit Hit" if hit_tp else "Stop Loss Hit"
             pnl_sign = "+" if pnl >= 0 else ""
             
             await send_alert(
-                f"{status_emoji} #{trade_no}\n\n"
-                f"{symbol}\n\n"
-                f"{result}\n\n"
-                f"Entry  {entry:.6f}\n"
-                f"Exit   {current_price:.6f}\n"
-                f"Price  {abs(current_price - entry):.6f}\n\n"
-                f"PnL: {pnl_sign}${pnl:.2f}\n"
-                f"Balance: ${balance:.2f}"
+                f"{status_emoji} <b>#{trade_no} - {exit_type}</b>\n\n"
+                f"<b>{symbol}</b>\n\n"
+                f"Direction: <b>{direction}</b>\n\n"
+                f"📍 Entry: <b>${entry:.6f}</b>\n"
+                f"🚪 Exit: <b>${current_price:.6f}</b>\n\n"
+                f"💹 Profit/Loss: <b>{pnl_sign}${pnl:.2f}</b>\n"
+                f"💰 Balance: <b>${balance:.2f}</b>"
             )
             
             # Mark for removal
