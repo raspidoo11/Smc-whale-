@@ -52,38 +52,15 @@ async def monitor_trades():
             logger.warning(f"Failed to get price for {symbol}")
             continue
         
-        # ===== BREAK EVEN LOGIC =====
-        if not trade.get("be_active", False):
-            if direction == "LONG":
-                halfway = entry + ((tp - entry) * 0.5)
-                
-                if current_price >= halfway:
-                    trade["sl"] = entry
-                    trade["be_active"] = True
-                    modified = True
-                    
-                    await send_alert(
-                        f"🟡 <b>#{trade_no} - Break Even Activated</b>\n\n"
-                        f"<b>{symbol}</b>\n\n"
-                        f"🛑 Stop Loss moved to Entry: <b>${entry:.6f}</b>"
-                    )
-            else:  # SHORT
-                halfway = entry - ((entry - tp) * 0.5)
-                
-                if current_price <= halfway:
-                    trade["sl"] = entry
-                    trade["be_active"] = True
-                    modified = True
-                    
-                    await send_alert(
-                        f"🟡 <b>#{trade_no} - Break Even Activated</b>\n\n"
-                        f"<b>{symbol}</b>\n\n"
-                        f"🛑 Stop Loss moved to Entry: <b>${entry:.6f}</b>"
-                    )
+        # ===== BREAK EVEN REMOVED =====
+        # Small pullbacks were hitting SL on scalps before reaching TP
+        # Removed entirely to avoid scratch trades
         
         # ===== TRAILING ACTIVATION =====
+        # Only activate trail when trade is significantly in profit
         if not trade.get("trail_active", False):
             if direction == "LONG":
+                # Activate at 75% of the way to TP
                 trigger = entry + ((tp - entry) * 0.75)
                 
                 if current_price >= trigger:
@@ -96,6 +73,7 @@ async def monitor_trades():
                         f"Now following price upward at 0.5% trail"
                     )
             else:  # SHORT
+                # Activate at 75% of the way to TP
                 trigger = entry - ((entry - tp) * 0.75)
                 
                 if current_price <= trigger:
@@ -129,7 +107,7 @@ async def monitor_trades():
                     logger.info(f"TRAIL UPDATE: {symbol} SL ${old_sl:.6f} → ${new_sl:.6f}")
         
         # ===== CHECK TP / SL HIT =====
-        sl = float(trade["sl"])  # Re-read in case it was updated
+        sl = float(trade["sl"])  # Re-read in case it was updated by trailing
         
         if direction == "LONG":
             pnl = (current_price - entry) * qty
@@ -150,7 +128,7 @@ async def monitor_trades():
             
             balance = get_balance()["balance"]
             
-            # IMPROVED: Better formatted exit alert with text labels
+            # Exit alert with trade number
             status_emoji = "✅" if hit_tp else "❌"
             exit_type = "Take Profit Hit" if hit_tp else "Stop Loss Hit"
             pnl_sign = "+" if pnl >= 0 else ""
