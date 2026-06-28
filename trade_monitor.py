@@ -20,8 +20,6 @@ async def monitor_trades():
     if not trades:
         return
 
-    logger.info(f"Monitoring {len(trades)} open paper trades...")
-
     for trade in trades[:]:
         if trade.get("status") != "OPEN":
             continue
@@ -50,50 +48,38 @@ async def monitor_trades():
             hit_tp = current_price <= tp
             hit_sl = current_price >= sl
 
-        # TP Hit
-        if hit_tp:
-            close_trade(symbol, current_price, "WIN")
+        if hit_tp or hit_sl:
+            result = "WIN" if hit_tp else "LOSS"
+            await close_position(symbol, direction)  # if using executor
+            close_trade(symbol, current_price, result)
             update_balance(pnl)
             bal = get_balance()["balance"]
+
+            emoji = "✅" if hit_tp else "❌"
             await send_alert(
-                f"✅ PAPER WIN\n\n"
+                f"{emoji} PAPER {result}\n\n"
                 f"{symbol}\n"
                 f"Entry: {entry:.4f}\n"
                 f"Exit: {current_price:.4f}\n"
-                f"Profit: +${pnl:.2f}\n"
+                f"Profit/Loss: {'+' if hit_tp else '-'}${abs(pnl):.2f}\n"
                 f"Balance: ${bal:.2f}"
             )
             continue
 
-        # SL Hit
-        if hit_sl:
-            close_trade(symbol, current_price, "LOSS")
-            update_balance(pnl)
-            bal = get_balance()["balance"]
-            await send_alert(
-                f"❌ PAPER LOSS\n\n"
-                f"{symbol}\n"
-                f"Entry: {entry:.4f}\n"
-                f"Exit: {current_price:.4f}\n"
-                f"Loss: -${abs(pnl):.2f}\n"
-                f"Balance: ${bal:.2f}"
-            )
-            continue
-
-        # Break-Even (low confidence)
+        # Break-Even
         if confidence < 70 and progress >= 0.5:
             new_sl = entry
             if (direction == "LONG" and new_sl > sl) or (direction == "SHORT" and new_sl < sl):
                 trade["sl"] = new_sl
-                await send_alert(f"🔄 BE Triggered for {symbol} - SL moved to entry")
+                await send_alert(f"🔄 BE Triggered {symbol} - SL to entry")
 
-        # Trailing Stop (all trades)
+        # Trailing Stop
         if progress >= 0.75:
             atr = trade.get("atr", distance_to_tp * 0.3)
             trail = atr * 0.5
             new_sl = current_price - trail if direction == "LONG" else current_price + trail
             if (direction == "LONG" and new_sl > sl) or (direction == "SHORT" and new_sl < sl):
                 trade["sl"] = new_sl
-                await send_alert(f"📈 Trailing SL for {symbol} updated to {new_sl:.4f}")
+                await send_alert(f"📈 Trailing SL {symbol} → {new_sl:.4f}")
 
     save_open_trades(trades)
