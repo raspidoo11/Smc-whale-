@@ -1,16 +1,43 @@
 import logging
-from trade_manager import risk_amount
+from trade_manager import get_balance
 
 logger = logging.getLogger(__name__)
 
 
 def calculate_qty(entry, sl):
-    """Calculate position size based on risk"""
-    risk = risk_amount()
-    distance = abs(entry - sl)
+    """Futures-style sizing with 10x leverage"""
 
-    if distance <= 0:
-        return 0.0
+    balance = get_balance()["balance"]
+    risk_usd = balance * 0.05   # 5% risk
 
-    qty = risk / distance
-    return round(qty, 6)
+    stop_distance_pct = abs(
+        entry - sl
+    ) / entry
+
+    if stop_distance_pct <= 0:
+        return 0
+
+    position_value = (
+        risk_usd /
+        stop_distance_pct
+    )
+
+    max_position = (
+        balance *
+        10   # 10x leverage
+    )
+
+    position_value = min(
+        position_value,
+        max_position
+    )
+
+    qty = (
+        position_value /
+        entry
+    )
+
+    return round(
+        qty,
+        6
+    )
