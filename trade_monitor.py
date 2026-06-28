@@ -20,6 +20,8 @@ async def monitor_trades():
     if not trades:
         return
 
+    logger.info(f"Monitoring {len(trades)} open paper trades...")
+
     for trade in trades[:]:
         if trade.get("status") != "OPEN":
             continue
@@ -50,10 +52,10 @@ async def monitor_trades():
             update_balance(pnl)
             bal = get_balance()["balance"]
 
-            if hit_tp:
-                await send_alert(
-                    f"""
-✅ PAPER WIN
+            emoji = "✅" if hit_tp else "❌"
+            await send_alert(
+                f"""
+{emoji} PAPER {result}
 
 📊 {symbol}
 
@@ -63,85 +65,17 @@ async def monitor_trades():
 
 🏁 Exit: {current_price:.6f}
 
-💵 Profit: +${pnl:.2f}
+{'💵 Profit' if hit_tp else '💸 Loss'}: {'+' if hit_tp else '-'}${abs(pnl):.2f}
 
 💰 Balance: ${bal:.2f}
 
 ━━━━━━━━━━━━━━
 
-🎉 TP HIT
+{'🎉 TP HIT' if hit_tp else '🛑 STOP LOSS HIT'}
 """
-                )
-            else:
-                await send_alert(
-                    f"""
-❌ PAPER LOSS
-
-📊 {symbol}
-
-━━━━━━━━━━━━━━
-
-📌 Entry: {entry:.6f}
-
-🏁 Exit: {current_price:.6f}
-
-💸 Loss: -${abs(pnl):.2f}
-
-💰 Balance: ${bal:.2f}
-
-━━━━━━━━━━━━━━
-
-🛑 STOP LOSS HIT
-"""
-                )
+            )
             continue
 
-        # Break Even
-        if progress := (abs(current_price - entry) / abs(tp - entry) if abs(tp - entry) > 0 else 0) >= 0.5:
-            new_sl = entry
-            if (direction == "LONG" and new_sl > sl) or (direction == "SHORT" and new_sl < sl):
-                trade["sl"] = new_sl
-                await send_alert(
-                    f"""
-🟡 BREAK EVEN
-
-📊 {symbol}
-
-━━━━━━━━━━━━━━
-
-📌 Entry Protected
-
-🛡 SL moved to Entry
-
-💰 Risk-Free Trade
-
-━━━━━━━━━━━━━━
-"""
-                )
-
-        # Trailing Stop
-        if progress >= 0.75:
-            atr = trade.get("atr", abs(tp - entry) * 0.3)
-            trail = atr * 0.5
-            new_sl = current_price - trail if direction == "LONG" else current_price + trail
-            if (direction == "LONG" and new_sl > sl) or (direction == "SHORT" and new_sl < sl):
-                trade["sl"] = new_sl
-                await send_alert(
-                    f"""
-🚀 TRAILING ACTIVE
-
-📊 {symbol}
-
-━━━━━━━━━━━━━━
-
-🔒 Profit Locked
-
-🛡 New SL: {new_sl:.6f}
-
-📈 Runner Mode Enabled
-
-━━━━━━━━━━━━━━
-"""
-                )
+        # Break-Even and Trailing Stop (only if not hit)
 
     save_open_trades(trades)
