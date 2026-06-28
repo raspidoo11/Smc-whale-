@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 
 exchange = get_exchange()
 
+
 async def scan():
     await monitor_trades()
     
@@ -79,7 +80,6 @@ async def scan():
             trade_no = next_trade_number()
             balance = get_balance()["balance"]
             
-            # Store trade with all metadata
             trade_data = {
                 "symbol": trade["symbol"],
                 "direction": trade["direction"],
@@ -93,27 +93,28 @@ async def scan():
             
             add_trade(trade_data)
             
+            # IMPROVED: Added text labels with emojis
             await send_alert(
                 f"""
-🟢 #{trade_no}
+🟢 <b>#{trade_no}</b>
 
-{trade['symbol']}
+<b>{trade['symbol']}</b>
 
-📈 {trade['direction']}
+📈 Direction: <b>{trade['direction']}</b>
 
-📍 {trade['entry']:.6f}
+📍 Entry: <b>${trade['entry']:.6f}</b>
 
-🛑 {trade['sl']:.6f}
+🛑 Stop Loss: <b>${trade['sl']:.6f}</b>
 
-🎯 {trade['tp']:.6f}
+🎯 Take Profit: <b>${trade['tp']:.6f}</b>
 
-📦 {trade['qty']:.4f}
+📦 Quantity: <b>{trade['qty']:.4f}</b>
 
-⚡ 10x
+⚡ Leverage: <b>10x</b>
 
-🔥 {trade.get('confidence', 0)}/100
+🔥 Confidence: <b>{trade.get('confidence', 0)}/100</b>
 
-💰 ${balance:.2f}
+💰 Balance: <b>${balance:.2f}</b>
 """
             )
         
@@ -123,22 +124,27 @@ async def scan():
     except Exception as e:
         logger.exception(f"SCAN FAILED: {e}")
 
+
 async def run_monitor():
     try:
         await monitor_trades()
     except Exception as e:
         logger.exception(f"Monitor failed: {e}")
 
+
 async def startup():
-    await send_alert("🚀 SMC Whale AI Started (Paper Mode)")
+    await send_alert("🚀 <b>SMC Whale AI Started (Paper Mode)</b>")
+
 
 def heartbeat():
     logger.info("Worker Alive")
 
+
 def daily_reset():
     """Reset daily PnL at midnight"""
     reset_daily_pnl()
-    asyncio.run(send_alert("📅 New trading day started! Daily PnL reset."))
+    asyncio.run(send_alert("📅 <b>New trading day started!</b> Daily PnL reset."))
+
 
 def run_scan_sync():
     """Wrapper to run async scan"""
@@ -147,12 +153,14 @@ def run_scan_sync():
     except Exception as e:
         logger.exception(f"Scan wrapper error: {e}")
 
+
 def run_monitor_sync():
     """Wrapper to run async monitor"""
     try:
         asyncio.run(run_monitor())
     except Exception as e:
         logger.exception(f"Monitor wrapper error: {e}")
+
 
 def main():
     logger.info("🚀 Starting SMC Whale AI - PAPER Mode")
@@ -171,7 +179,7 @@ def main():
     schedule.every(45).seconds.do(run_monitor_sync)
     schedule.every(2).minutes.do(run_scan_sync)
     
-    # DAILY RESET: Runs at 00:00 (midnight) every day
+    # Daily reset at midnight UTC
     schedule.every().day.at("00:00").do(daily_reset)
     
     logger.info("Scheduler initialized")
@@ -188,4 +196,6 @@ def main():
             logger.exception(f"Main loop error: {e}")
             time.sleep(30)
 
+
 if __name__ == "__main__":
+    main()
