@@ -78,6 +78,10 @@ async def scan():
             trade_no = next_trade_number()
             balance = get_balance()["balance"]
 
+            # Deduct risk on open
+            risk = trade["qty"] * abs(trade["entry"] - trade["sl"])
+            update_balance(-risk)
+
             add_trade({
                 "symbol": trade["symbol"],
                 "direction": trade["direction"],
