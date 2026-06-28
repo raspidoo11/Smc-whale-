@@ -87,6 +87,7 @@ async def scan():
                 f"Risk: 5% of balance"
             )
 
+        # Retrain XGBoost if enough data
         if len(get_trade_history()) >= 10:
             train_model()
 
