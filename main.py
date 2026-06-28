@@ -64,7 +64,7 @@ async def scan():
         results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         top3 = results[:3]
 
-                for trade in top3:
+        for trade in top3:
             add_trade({
                 "symbol": trade["symbol"],
                 "direction": trade["direction"],
