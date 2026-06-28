@@ -8,7 +8,13 @@ from strategy import get_signal
 from paper_trader import calculate_qty
 from exchange import get_exchange
 from telegram_alerts import send_alert
-from trade_manager import add_trade, trading_allowed
+from trade_manager import (
+    add_trade,
+    trading_allowed,
+    trade_exists,
+    next_trade_number,
+    get_balance
+)
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model
 from trade_manager import get_trade_history
@@ -65,6 +71,13 @@ async def scan():
         top3 = results[:3]
 
         for trade in top3:
+            if trade_exists(trade["symbol"]):
+                logger.info(f"Skipping duplicate trade: {trade['symbol']}")
+                continue
+
+            trade_no = next_trade_number()
+            balance = get_balance()["balance"]
+
             add_trade({
                 "symbol": trade["symbol"],
                 "direction": trade["direction"],
@@ -77,30 +90,20 @@ async def scan():
 
             await send_alert(
                 f"""
-🟢 PAPER OPENED
+🟢 #{trade_no}
 
-📊 {trade['symbol']}
+{trade['symbol']}
 
-━━━━━━━━━━━━━━
+📈 {trade['direction']}
 
-🎯 Direction: {trade['direction']}
+📍 {trade['entry']:.6f}
+🛑 {trade['sl']:.6f}
+🎯 {trade['tp']:.6f}
 
-📌 Entry: {trade['entry']:.6f}
+📦 {trade['qty']}
+🔥 {trade.get('confidence', 0)}/100
 
-🛑 Stop Loss: {trade['sl']:.6f}
-
-🎯 Take Profit: {trade['tp']:.6f}
-
-📦 Qty: {trade['qty']}
-
-🔥 Confidence: {trade.get('confidence', 0)}/100
-
-💰 Risk: 5% Balance
-
-━━━━━━━━━━━━━━
-
-🤖 SMC Whale AI
-📝 Paper Trade
+💰 ${balance:.2f}
 """
             )
 
@@ -118,33 +121,9 @@ async def run_monitor():
         logger.exception(f"Monitor failed: {e}")
 
 
-from trade_manager import get_balance
-
 async def startup():
+    await send_alert("🚀 SMC Whale AI Started (Paper Mode)")
 
-    balance = get_balance()["balance"]
-
-    await send_alert(
-        f"""
-<b>🚀 SMC WHALE AI ONLINE</b>
-
-━━━━━━━━━━━━━━
-
-💰 Balance: ${balance:.2f}
-
-📊 Market: Bybit Futures
-
-🧠 Strategy: SMC + XGBoost
-
-⏱ Scan: Every 2 Minutes
-
-━━━━━━━━━━━━━━
-
-✅ Telegram Connected
-✅ Scanner Ready
-✅ Paper Trading Active
-"""
-    )
 
 def heartbeat():
     logger.info("Worker Alive")
