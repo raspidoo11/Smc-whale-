@@ -118,9 +118,33 @@ async def run_monitor():
         logger.exception(f"Monitor failed: {e}")
 
 
-async def startup():
-    await send_alert("🚀 SMC Whale AI Started (Paper Mode)")
+from trade_manager import get_balance
 
+async def startup():
+
+    balance = get_balance()["balance"]
+
+    await send_alert(
+        f"""
+<b>🚀 SMC WHALE AI ONLINE</b>
+
+━━━━━━━━━━━━━━
+
+💰 Balance: ${balance:.2f}
+
+📊 Market: Bybit Futures
+
+🧠 Strategy: SMC + XGBoost
+
+⏱ Scan: Every 2 Minutes
+
+━━━━━━━━━━━━━━
+
+✅ Telegram Connected
+✅ Scanner Ready
+✅ Paper Trading Active
+"""
+    )
 
 def heartbeat():
     logger.info("Worker Alive")
