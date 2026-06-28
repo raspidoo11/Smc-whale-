@@ -1,4 +1,21 @@
 {
+  "$schema": "https://railway.app/json-schema.json",
+  "build": {
+    "builder": "nixpacks"
+  },
+  "deploy": {
+    "numReplicas": 1,
+    "startCommand": "python main.py"
+  },
+  "volumes": [
+    {
+      "name": "paper_trading_data",
+      "mountPath": "/app/data"
+    }
+  ]
+}
+
+{
   "$schema": "https://railway.app/railway.schema.json",
   "deploy": {
     "restartPolicyType": "ON_FAILURE",
