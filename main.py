@@ -13,7 +13,8 @@ from trade_manager import (
     trading_allowed,
     trade_exists,
     next_trade_number,
-    get_balance
+    get_balance,
+    update_balance
 )
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model
