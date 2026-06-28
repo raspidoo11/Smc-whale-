@@ -2,6 +2,7 @@ import asyncio
 import schedule
 import time
 import logging
+from datetime import datetime
 from scanner import get_top_symbols, get_ohlcv
 from strategy import get_signal
 from paper_trader import calculate_qty
@@ -12,7 +13,8 @@ from trade_manager import (
     trading_allowed,
     trade_exists,
     next_trade_number,
-    get_balance
+    get_balance,
+    reset_daily_pnl
 )
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model
@@ -26,9 +28,6 @@ logger = logging.getLogger(__name__)
 
 exchange = get_exchange()
 
-# Global event loop for scheduling
-loop = None
-
 async def scan():
     await monitor_trades()
     
@@ -36,7 +35,7 @@ async def scan():
         logger.info("Starting signal scan...")
         
         if not trading_allowed():
-            logger.info("Daily target reached. Trading paused.")
+            logger.info("Daily loss limit reached. Trading paused for today.")
             return
         
         symbols = get_top_symbols(20)
@@ -80,7 +79,7 @@ async def scan():
             trade_no = next_trade_number()
             balance = get_balance()["balance"]
             
-            # FIXED: Store trade_no in the trade dict for monitoring
+            # Store trade with all metadata
             trade_data = {
                 "symbol": trade["symbol"],
                 "direction": trade["direction"],
@@ -89,7 +88,7 @@ async def scan():
                 "tp": float(trade["tp"]),
                 "qty": float(trade["qty"]),
                 "status": "OPEN",
-                "trade_no": trade_no  # NEW: Store trade number for alerts
+                "trade_no": trade_no
             }
             
             add_trade(trade_data)
@@ -136,6 +135,11 @@ async def startup():
 def heartbeat():
     logger.info("Worker Alive")
 
+def daily_reset():
+    """Reset daily PnL at midnight"""
+    reset_daily_pnl()
+    asyncio.run(send_alert("📅 New trading day started! Daily PnL reset."))
+
 def run_scan_sync():
     """Wrapper to run async scan"""
     try:
@@ -167,7 +171,13 @@ def main():
     schedule.every(45).seconds.do(run_monitor_sync)
     schedule.every(2).minutes.do(run_scan_sync)
     
+    # DAILY RESET: Runs at 00:00 (midnight) every day
+    schedule.every().day.at("00:00").do(daily_reset)
+    
     logger.info("Scheduler initialized")
+    logger.info("Loss limit: -$15 (15% drawdown from $100)")
+    logger.info("Profit cap: UNLIMITED ✅")
+    logger.info("Daily reset: 00:00 UTC")
     
     # Main loop
     while True:
@@ -179,4 +189,3 @@ def main():
             time.sleep(30)
 
 if __name__ == "__main__":
-    main()
