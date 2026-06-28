@@ -76,18 +76,34 @@ async def scan():
             })
 
             await send_alert(
-                f"📈 PAPER TRADE OPENED\n\n"
-                f"📍 {trade['symbol']}\n"
-                f"Direction: {trade['direction']}\n"
-                f"Entry: {trade['entry']:.4f}\n"
-                f"SL: {trade['sl']:.4f}\n"
-                f"TP: {trade['tp']:.4f}\n"
-                f"Qty: {trade['qty']}\n"
-                f"Confidence: {trade.get('confidence', 0)}/100\n"
-                f"Risk: 5% of balance"
+                f"""
+🟢 PAPER OPENED
+
+📊 {trade['symbol']}
+
+━━━━━━━━━━━━━━
+
+🎯 Direction: {trade['direction']}
+
+📌 Entry: {trade['entry']:.6f}
+
+🛑 Stop Loss: {trade['sl']:.6f}
+
+🎯 Take Profit: {trade['tp']:.6f}
+
+📦 Qty: {trade['qty']}
+
+🔥 Confidence: {trade.get('confidence', 0)}/100
+
+💰 Risk: 5% Balance
+
+━━━━━━━━━━━━━━
+
+🤖 SMC Whale AI
+📝 Paper Trade
+"""
             )
 
-        # Retrain XGBoost if enough data
         if len(get_trade_history()) >= 10:
             train_model()
 
