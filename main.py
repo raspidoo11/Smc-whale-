@@ -64,7 +64,7 @@ async def scan():
         results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
         top3 = results[:3]
 
-        for trade in top3:
+                for trade in top3:
             add_trade({
                 "symbol": trade["symbol"],
                 "direction": trade["direction"],
@@ -76,14 +76,15 @@ async def scan():
             })
 
             await send_alert(
-                f"📈 PAPER TRADE\n\n"
-                f"{trade['symbol']}\n"
+                f"📈 PAPER TRADE OPENED\n\n"
+                f"📍 {trade['symbol']}\n"
                 f"Direction: {trade['direction']}\n"
                 f"Entry: {trade['entry']:.4f}\n"
                 f"SL: {trade['sl']:.4f}\n"
                 f"TP: {trade['tp']:.4f}\n"
                 f"Qty: {trade['qty']}\n"
-                f"Confidence: {trade.get('confidence', 0)}%"
+                f"Confidence: {trade.get('confidence', 0)}/100\n"
+                f"Risk: 5% of balance"
             )
 
         if len(get_trade_history()) >= 10:
