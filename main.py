@@ -17,7 +17,7 @@ from trade_manager import (
     reset_daily_pnl
 )
 from trade_monitor import monitor_trades
-from xgboost_trainer import train_model
+from xgboost_trainer import train_model_incremental as train_model
 from trade_manager import get_trade_history
 
 logging.basicConfig(
