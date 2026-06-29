@@ -24,11 +24,14 @@ def calculate_features(df):
     df["displacement"] = (df["body"] > df["atr"] * 0.7).astype(int)
     return df
 
+# More aggressive BOS
 def bullish_bos(df):
-    return df["close"].iloc[-1] > df["high"].iloc[-10:-1].max()
+    recent_high = df["high"].iloc[-15:-1].max()
+    return df["close"].iloc[-1] > recent_high * 0.999
 
 def bearish_bos(df):
-    return df["close"].iloc[-1] < df["low"].iloc[-10:-1].min()
+    recent_low = df["low"].iloc[-15:-1].min()
+    return df["close"].iloc[-1] < recent_low * 1.001
 
 def get_signal(df_15m, df_5m):
     try:
@@ -48,11 +51,11 @@ def get_signal(df_15m, df_5m):
             return None
         
         bull_sweep = (
-            latest["low"] < df_5m["low"].iloc[-10:-1].min()
+            latest["low"] < df_5m["low"].iloc[-12:-1].min()
             and latest["close"] > latest["open"]
         )
         bear_sweep = (
-            latest["high"] > df_5m["high"].iloc[-10:-1].max()
+            latest["high"] > df_5m["high"].iloc[-12:-1].max()
             and latest["close"] < latest["open"]
         )
         
@@ -63,13 +66,13 @@ def get_signal(df_15m, df_5m):
         if latest["volume_spike"] == 1:
             score += 25
         if latest["displacement"] == 1:
-            score += 20
+            score += 25   # Boosted for early momentum
         if trend_bull:
             score += 15
         if trend_bear:
             score += 15
         if bull_sweep or bear_sweep:
-            score += 15
+            score += 20   # Boosted
         if bull_fvg or bear_fvg:
             score += 10
         
@@ -131,8 +134,9 @@ def get_signal(df_15m, df_5m):
             f"XGBoost={'ON' if USE_XGBOOST else 'OFF'}"
         )
         
-        if trend_bull and final_confidence >= 50:
-            sl = entry - atr
+        # Aggressive entry logic
+        if (trend_bull or latest["displacement"] == 1) and final_confidence >= 40:
+            sl = entry - atr * 1.1
             tp = entry + (entry - sl) * 1.5
             
             return {
@@ -148,8 +152,8 @@ def get_signal(df_15m, df_5m):
                 "fvg": 1 if (bull_fvg or bear_fvg) else 0
             }
         
-        if trend_bear and final_confidence >= 50:
-            sl = entry + atr
+        if (trend_bear or latest["displacement"] == 1) and final_confidence >= 40:
+            sl = entry + atr * 1.1
             tp = entry - (sl - entry) * 1.5
             
             return {
