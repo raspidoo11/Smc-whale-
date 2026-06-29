@@ -203,8 +203,14 @@ def train_model_incremental():
         return None
 
     df = pd.DataFrame(data)
-    X = df.drop('target', axis=1)
+    X = df.drop('target', axis=1, errors='ignore')
     y = df['target']
+
+    # === FIX: Convert to pure numeric features (removes strings like 'exit_reason') ===
+    X = X.select_dtypes(include=[np.number]).copy()
+    X = X.fillna(0)  # Fill any NaNs
+
+    logger.info(f"Training with {X.shape[1]} numeric features")
 
     model = XGBClassifier(
         n_estimators=100,
