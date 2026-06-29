@@ -19,7 +19,6 @@ def extract_pro_features_from_trade(trade, historical_context=None):
     """Professional feature engineering for pro trader thinking"""
 
     features = {
-        # Core SMC
         'volume_spike': trade.get('volume_spike', 0),
         'displacement': trade.get('displacement', 0),
         'trend_bull': 1 if trade.get('direction') == 'LONG' else 0,
@@ -48,7 +47,6 @@ def extract_pro_features_from_trade(trade, historical_context=None):
     features['volume_strength'] = trade.get('volume', 0) / max(trade.get('volume_ma', 1), 0.0001)
     features['atr_expansion'] = trade.get('atr', 0)
 
-    # Confluence
     confluence_score = 0
     if trade.get('volume_spike', 0): confluence_score += 1
     if trade.get('displacement', 0): confluence_score += 1
@@ -56,7 +54,6 @@ def extract_pro_features_from_trade(trade, historical_context=None):
     if trade.get('fvg', 0): confluence_score += 1
     features['confluence_count'] = confluence_score
 
-    # Session
     hour = trade.get('hour', 12)
     features['hour'] = hour
     features['is_london_open'] = 1 if 7 <= hour <= 11 else 0
@@ -70,25 +67,16 @@ def extract_pro_features_from_trade(trade, historical_context=None):
     features['is_monday'] = 1 if day == 0 else 0
     features['is_friday'] = 1 if day == 4 else 0
 
-    # Confidence
     features['confidence'] = trade.get('confidence', 50)
     features['ai_prob'] = trade.get('ai_prob', 50)
     features['smc_ai_divergence'] = abs(trade.get('confidence', 50) - trade.get('ai_prob', 50))
 
-    # Trade type
     features['is_scalp'] = 1 if trade.get('risk_reward', 1.5) < 1.8 else 0
     features['is_swing'] = 1 if trade.get('risk_reward', 1.5) >= 2.0 else 0
     features['qty_size'] = np.log1p(trade.get('qty', 1))
     features['trade_duration_hours'] = trade.get('duration_hours', 1)
     features['sl_tightness'] = features['risk_pct']
 
-    # Interactions
-    features['volume_x_displacement'] = trade.get('volume_spike', 0) * trade.get('displacement', 0)
-    features['confluence_x_confidence'] = (confluence_score / 4.0) * (trade.get('confidence', 50) / 100.0)
-    features['sweep_x_fvg'] = trade.get('sweep', 0) * trade.get('fvg', 0)
-    features['volatility_x_risk'] = features['atr_expansion'] * features['risk_pct']
-
-    # Historical context
     if historical_context:
         features['recent_win_rate'] = historical_context.get('recent_win_rate', 0.5)
         features['streak_count'] = historical_context.get('streak_count', 0)
@@ -101,6 +89,11 @@ def extract_pro_features_from_trade(trade, historical_context=None):
         features['is_hot_streak'] = 0
         features['cumulative_pnl'] = 0
         features['current_dd_pct'] = 0
+
+    features['volume_x_displacement'] = trade.get('volume_spike', 0) * trade.get('displacement', 0)
+    features['confluence_x_confidence'] = (confluence_score / 4.0) * (trade.get('confidence', 50) / 100.0)
+    features['sweep_x_fvg'] = trade.get('sweep', 0) * trade.get('fvg', 0)
+    features['volatility_x_risk'] = features['atr_expansion'] * features['risk_pct']
 
     return features
 
@@ -156,10 +149,7 @@ def calculate_historical_context(history):
 
 
 def analyze_exit(trade):
-    """
-    Analyze WHY a trade exited (SL vs TP)
-    Returns exit analysis details
-    """
+    """Analyze WHY a trade exited (SL vs TP)"""
     
     analysis = {
         'trade_no': trade.get('trade_no'),
@@ -185,11 +175,7 @@ def analyze_exit(trade):
 
 
 def train_model_incremental():
-    """
-    Retrain model after EACH trade closes
-    Uses warm_start for incremental learning
-    Minimum 5 trades to start learning
-    """
+    """Retrain model after EACH trade closes"""
     
     history = get_trade_history()
     
@@ -274,10 +260,7 @@ def train_model_incremental():
 
 
 def get_xgboost_probability(trade_features):
-    """
-    Get AI probability for a trade setup
-    Explains reasoning based on what model learned
-    """
+    """Get AI probability for a trade setup"""
     
     if not Path(MODEL_PATH).exists():
         return 50.0
@@ -291,45 +274,9 @@ def get_xgboost_probability(trade_features):
         
         prob = model.predict_proba(X)[0][1] * 100
         
-        confidence = trade_features.get('confidence', 50)
-        confluence = trade_features.get('confluence_count', 0)
-        adversity = trade_features.get('adversity_ratio', 0)
-        is_london = trade_features.get('is_london_open', 0)
-        sl_tight = trade_features.get('sl_tightness', 0)
-        
-        logger.debug(
-            f"AI Assessment: {prob:.1f}% | "
-            f"Confluence: {confluence}/4 | "
-            f"Session: {'London' if is_london else 'Other'} | "
-            f"SL Tightness: {sl_tight:.1%} | "
-            f"Adversity: {adversity:.2f}"
-        )
-        
+        logger.debug(f"AI Probability: {prob:.1f}%")
         return round(prob, 1)
         
     except Exception as e:
         logger.error(f"XGBoost prediction failed: {e}")
         return 50.0
-
-
-def get_model_confidence():
-    """Get current model statistics"""
-    
-    if not Path(MODEL_PATH).exists():
-        return None
-    
-    try:
-        history = get_trade_history()
-        if len(history) == 0:
-            return {'trades_learned': 0, 'confidence': 'No data'}
-        
-        recent = history[-5:]
-        recent_wins = sum(1 for t in recent if t.get('status') == 'WIN')
-        
-        return {
-            'trades_learned': len(history),
-            'recent_win_rate': f"{(recent_wins/len(recent)*100):.0f}%",
-            'model_status': 'Learning'
-        }
-    except:
-        return None
