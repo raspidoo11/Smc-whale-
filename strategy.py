@@ -9,12 +9,6 @@ logger = logging.getLogger(__name__)
 
 USE_XGBOOST = os.getenv("USE_XGBOOST", "false").lower() == "true"
 
-try:
-    from xgboost_trainer import get_xgboost_probability
-except ImportError:
-    def get_xgboost_probability(features):
-        return 50.0
-
 def calculate_features(df):
     df = df.copy()
     df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
@@ -75,13 +69,19 @@ def get_signal(df_15m, df_5m):
         
         entry = latest["close"]
         
-        # Dynamic features
+        # Dynamic time-based features
         now = datetime.now()
         hour = now.hour
         day_of_week = now.weekday()
         
+        # Get real historical context from actual trades
         history = get_trade_history()
-        context = calculate_historical_context(history) if len(history) >= 5 else {}
+        context = calculate_historical_context(history) if len(history) >= 5 else {
+            'recent_win_rate': 0.5,
+            'streak_count': 0,
+            'cumulative_pnl': 0,
+            'current_dd_pct': 0
+        }
         
         ai_prob = 50.0
         if USE_XGBOOST:
@@ -111,22 +111,22 @@ def get_signal(df_15m, df_5m):
                 'is_friday': 1 if day_of_week == 4 else 0,
                 'is_scalp': 1 if 1.5 < 1.8 else 0,
                 'is_swing': 1 if 1.5 >= 2.0 else 0,
-                'qty_size': 0.0,
-                'trade_duration_hours': 1,
-                'sl_tightness': 0.01,
+                'qty_size': 0.0,                    # Can be made dynamic later if needed
+                'trade_duration_hours': 1,          # Can be made dynamic later if needed
+                'sl_tightness': 0.01,               # Can be made dynamic later if needed
                 'recent_win_rate': context.get('recent_win_rate', 0.5),
                 'streak_count': context.get('streak_count', 0),
                 'is_hot_streak': 1 if context.get('streak_count', 0) > 0 else 0,
                 'cumulative_pnl': context.get('cumulative_pnl', 0),
                 'current_dd_pct': context.get('current_dd_pct', 0),
                 'volume_x_displacement': latest["volume_spike"] * latest["displacement"],
-                'confluence_x_confidence': 0,
+                'confluence_x_confidence': (sum([latest["volume_spike"], latest["displacement"], bull_sweep or bear_sweep, bull_fvg or bear_fvg]) / 4.0) * (score / 100.0),
                 'sweep_x_fvg': (1 if (bull_sweep or bear_sweep) else 0) * (1 if (bull_fvg or bear_fvg) else 0),
-                'volatility_x_risk': 0,
+                'volatility_x_risk': float(atr) * 0.01,
                 'risk_pct': 0.01,
                 'reward_pct': 0.015,
                 'adversity_ratio': 0.67,
-                'smc_ai_divergence': 0
+                'smc_ai_divergence': abs(score - 50)
             }
             ai_prob = get_xgboost_probability(trade_features)
         
