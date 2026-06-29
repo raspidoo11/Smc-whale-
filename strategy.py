@@ -1,7 +1,7 @@
 import pandas as pd
 import logging
 import os
-from xgboost_continuous_learning import get_xgboost_probability
+from xgboost_trainer import get_xgboost_probability
 
 logger = logging.getLogger(__name__)
 
