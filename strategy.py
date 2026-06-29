@@ -1,19 +1,17 @@
 import pandas as pd
 import logging
 import os
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
 USE_XGBOOST = os.getenv("USE_XGBOOST", "false").lower() == "true"
 
 try:
-    from xgboost_continuous_learning import get_xgboost_probability
+    from xgboost_trainer import get_xgboost_probability
 except ImportError:
-    try:
-        from xgboost_trainer import get_xgboost_probability
-    except ImportError:
-        def get_xgboost_probability(features):
-            return 50.0
+    def get_xgboost_probability(features):
+        return 50.0
 
 def calculate_features(df):
     df = df.copy()
@@ -29,6 +27,41 @@ def bullish_bos(df):
 
 def bearish_bos(df):
     return df["close"].iloc[-1] < df["low"].iloc[-10:-1].min()
+
+def calculate_recent_stats():
+    """Calculate real win rate and streak from trade history"""
+    try:
+        from trade_manager import get_trade_history
+        history = get_trade_history()
+        
+        if len(history) < 5:
+            return {'recent_win_rate': 0.5, 'streak_count': 0}
+        
+        recent_trades = history[-10:]
+        recent_wins = sum(1 for t in recent_trades if t.get('status') == 'WIN')
+        recent_win_rate = recent_wins / len(recent_trades) if recent_trades else 0.5
+        
+        streak = 0
+        streak_sign = None
+        for trade in reversed(history):
+            is_win = trade.get('status') == 'WIN'
+            if streak_sign is None:
+                streak_sign = is_win
+                streak = 1
+            elif (is_win and streak_sign) or (not is_win and not streak_sign):
+                streak += 1
+            else:
+                break
+        
+        if streak_sign is False:
+            streak = -streak
+        
+        return {
+            'recent_win_rate': recent_win_rate,
+            'streak_count': streak
+        }
+    except:
+        return {'recent_win_rate': 0.5, 'streak_count': 0}
 
 def get_signal(df_15m, df_5m):
     try:
@@ -74,10 +107,27 @@ def get_signal(df_15m, df_5m):
             score += 10
         
         entry = latest["close"]
-        
         ai_prob = 50.0
         
         if USE_XGBOOST:
+            # Get REAL time and day
+            now = datetime.now()
+            hour = now.hour
+            day_of_week = now.weekday()
+            
+            # Get real recent stats
+            stats = calculate_recent_stats()
+            recent_win_rate = stats['recent_win_rate']
+            streak_count = stats['streak_count']
+            
+            # Real confluence count
+            confluence_count = sum([
+                latest["volume_spike"],
+                latest["displacement"],
+                1 if (bull_sweep or bear_sweep) else 0,
+                1 if (bull_fvg or bear_fvg) else 0
+            ])
+            
             trade_features = {
                 'volume_spike': latest["volume_spike"],
                 'displacement': latest["displacement"],
@@ -87,41 +137,43 @@ def get_signal(df_15m, df_5m):
                 'atr': float(atr),
                 'qty': 1.0,
                 'risk_reward': 1.5,
-                'hour': 12,
-                'day_of_week': 2,
-                'confidence': int(0.6 * score + 0.4 * 50),
+                'hour': hour,  # REAL hour
+                'day_of_week': day_of_week,  # REAL day
+                'confidence': int(0.4 * score + 0.6 * 50),
                 'ai_prob': 50.0,
                 'body_ratio': latest["body"] / max(atr, 0.0001),
                 'volume_strength': latest["volume"] / max(latest["volume_ma"], 0.0001),
                 'atr_expansion': float(atr),
-                'confluence_count': sum([latest["volume_spike"], latest["displacement"], bull_sweep or bear_sweep, bull_fvg or bear_fvg]),
-                'is_london_open': 0,
-                'is_ny_open': 0,
-                'is_asian': 0,
-                'is_overlap': 0,
-                'is_quiet_time': 0,
-                'is_monday': 0,
-                'is_friday': 0,
-                'is_scalp': 0,
-                'is_swing': 0,
+                'confluence_count': confluence_count,
+                'is_london_open': 1 if 7 <= hour <= 11 else 0,
+                'is_ny_open': 1 if 12 <= hour <= 16 else 0,
+                'is_asian': 1 if (hour >= 22 or hour <= 6) else 0,
+                'is_overlap': 1 if 8 <= hour <= 11 else 0,
+                'is_quiet_time': 1 if 17 <= hour <= 21 else 0,
+                'is_monday': 1 if day_of_week == 0 else 0,
+                'is_friday': 1 if day_of_week == 4 else 0,
+                'is_scalp': 1 if 1.5 < 1.8 else 0,
+                'is_swing': 1 if 1.5 >= 2.0 else 0,
                 'qty_size': 0.0,
                 'trade_duration_hours': 1,
                 'sl_tightness': 0.01,
-                'recent_win_rate': 0.5,
-                'streak_count': 0,
-                'is_hot_streak': 0,
+                'recent_win_rate': recent_win_rate,  # REAL
+                'streak_count': streak_count,  # REAL
+                'is_hot_streak': 1 if streak_count > 0 else 0,
                 'cumulative_pnl': 0,
                 'current_dd_pct': 0,
                 'volume_x_displacement': latest["volume_spike"] * latest["displacement"],
-                'confluence_x_confidence': 0,
+                'confluence_x_confidence': (confluence_count / 4.0) * 0.5,
                 'sweep_x_fvg': (1 if (bull_sweep or bear_sweep) else 0) * (1 if (bull_fvg or bear_fvg) else 0),
-                'volatility_x_risk': 0,
+                'volatility_x_risk': float(atr) * 0.01,
                 'risk_pct': 0.01,
                 'reward_pct': 0.015,
                 'adversity_ratio': 0.67,
                 'smc_ai_divergence': 0
             }
+            
             ai_prob = get_xgboost_probability(trade_features)
+            logger.info(f"🤖 AI Score: {ai_prob}% (from real features)")
         
         final_confidence = int(0.4 * score + 0.6 * ai_prob)
         
