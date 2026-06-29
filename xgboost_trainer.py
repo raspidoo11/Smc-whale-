@@ -15,8 +15,8 @@ FEATURE_PATH = "/app/data/models/feature_names.pkl"
 
 os.makedirs("/app/data/models", exist_ok=True)
 
+
 def extract_pro_features_from_trade(trade, historical_context=None):
-    """Your original full function"""
     features = {
         'volume_spike': trade.get('volume_spike', 0),
         'displacement': trade.get('displacement', 0),
@@ -98,7 +98,6 @@ def extract_pro_features_from_trade(trade, historical_context=None):
 
 
 def calculate_historical_context(history):
-    """Your original function"""
     if len(history) < 5:
         return {
             'recent_win_rate': 0.5,
@@ -147,7 +146,6 @@ def calculate_historical_context(history):
 
 
 def analyze_exit(trade):
-    """Your original function"""
     analysis = {
         'trade_no': trade.get('trade_no'),
         'symbol': trade.get('symbol'),
@@ -172,7 +170,6 @@ def analyze_exit(trade):
 
 
 def train_model_incremental():
-    """Retrain model after EACH trade closes"""
     history = get_trade_history()
     
     if len(history) < 5:
@@ -184,7 +181,7 @@ def train_model_incremental():
     context = calculate_historical_context(history)
 
     data = []
-    for i, trade in enumerate(history):
+    for trade in history:
         if trade.get("status") in ["WIN", "LOSS"]:
             feat = extract_pro_features_from_trade(trade, context)
             feat['target'] = 1 if trade["status"] == "WIN" else 0
@@ -227,38 +224,19 @@ def train_model_incremental():
     loss_count = (y == 0).sum()
     win_rate = win_count / len(y)
     
-    feature_importance = pd.DataFrame({
-        'feature': X.columns,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
-
     logger.info(f"\n✅ MODEL UPDATED!")
     logger.info(f"   Trades Learned: {len(data)} (W: {win_count}, L: {loss_count})")
     logger.info(f"   Accuracy: {accuracy:.1%}")
     logger.info(f"   Win Rate: {win_rate:.1%}")
-    
-    logger.info(f"\n   📊 Top 10 Features (What Model Learned):")
-    for idx, row in feature_importance.head(10).iterrows():
-        logger.info(f"      {row['feature']}: {row['importance']:.3f}")
-
-    logger.info(f"\n   📈 Latest Trade Analysis:")
-    if len(history) > 0:
-        last_trade = history[-1]
-        exit_analysis = analyze_exit(last_trade)
-        
-        logger.info(f"      Trade #{exit_analysis['trade_no']}: {exit_analysis['symbol']}")
-        logger.info(f"      Direction: {exit_analysis['direction']}")
-        logger.info(f"      Entry → Exit: ${exit_analysis['entry']:.6f} → ${exit_analysis['exit_price']:.6f}")
-        logger.info(f"      Result: {exit_analysis['status']} ({exit_analysis['pnl']:+.2f}%)")
-        logger.info(f"      Exit Reason: {exit_analysis['reason_detail']}")
 
     return model
 
 
 def get_xgboost_probability(trade_features):
-    """Get AI probability for a trade setup"""
+    model_exists = Path(MODEL_PATH).exists()
+    logger.info(f"🔍 Model file check: {MODEL_PATH} → Exists: {model_exists}")
     
-    if not Path(MODEL_PATH).exists():
+    if not model_exists:
         logger.warning("Model not found — forcing retrain")
         train_model_incremental()
     
