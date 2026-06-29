@@ -69,11 +69,11 @@ def get_signal(df_15m, df_5m):
             if trend_bear and df_5m["close"].iloc[-2] > df_5m["open"].iloc[-2]:
                 ob_bear = True
         
-        # Liquidity Sweep (extended range)
+        # Liquidity Sweep
         bull_liquidity = latest["low"] < df_5m["low"].iloc[-15:-1].min()
         bear_liquidity = latest["high"] > df_5m["high"].iloc[-15:-1].max()
         
-        # Scoring (Full SMC Confluence)
+        # Scoring
         score = 0
         if latest["volume_spike"] == 1:
             score += 25
@@ -142,7 +142,7 @@ def get_signal(df_15m, df_5m):
             }
             ai_prob = get_xgboost_probability(trade_features)
         
-        final_confidence = int(0.6 * score + 0.4 * ai_prob)
+        final_confidence = int(0.4 * score + 0.6 * ai_prob)
         
         logger.info(
             f"Signal check | trend_bull={trend_bull} | trend_bear={trend_bear} | "
@@ -151,9 +151,10 @@ def get_signal(df_15m, df_5m):
         )
         
         if trend_bull and final_confidence >= 50:
-            swing_low = df_5m["low"].iloc[-12:-1].min()
-            sl = min(swing_low * 0.999, entry - atr)
-            tp = entry + (entry - sl) * 2.0
+            # Tight SL for scalping + structure
+            swing_low = df_5m["low"].iloc[-8:-1].min()
+            sl = min(swing_low * 0.9995, entry - atr * 0.8)
+            tp = entry + (entry - sl) * 1.5   # 1.5 RR
             
             return {
                 "direction": "LONG",
@@ -169,9 +170,9 @@ def get_signal(df_15m, df_5m):
             }
         
         if trend_bear and final_confidence >= 50:
-            swing_high = df_5m["high"].iloc[-12:-1].max()
-            sl = max(swing_high * 1.001, entry + atr)
-            tp = entry - (sl - entry) * 2.0
+            swing_high = df_5m["high"].iloc[-8:-1].max()
+            sl = max(swing_high * 1.0005, entry + atr * 0.8)
+            tp = entry - (sl - entry) * 1.5
             
             return {
                 "direction": "SHORT",
