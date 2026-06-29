@@ -114,6 +114,7 @@ def get_signal(df_15m, df_5m):
         risk_pct = abs(entry - sl) / entry
         reward_pct = abs(tp - entry) / entry
         adversity_ratio = risk_pct / max(reward_pct, 0.0001)
+        risk_reward = abs(tp - entry) / max(abs(entry - sl), 0.0001)
 
         ai_prob = 50.0
 
@@ -125,7 +126,7 @@ def get_signal(df_15m, df_5m):
                 "sweep": 1 if (bull_sweep or bear_sweep) else 0,
                 "fvg": 1 if (bull_fvg or bear_fvg) else 0,
                 "atr": float(atr),
-                "risk_reward": 1.5,
+                "risk_reward": risk_reward,
                 "hour": hour,
                 "day_of_week": day_of_week,
                 "body_ratio": latest["body"] / max(atr, 0.0001),
