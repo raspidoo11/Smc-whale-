@@ -1,6 +1,8 @@
 import pandas as pd
 import logging
 import os
+from datetime import datetime
+from trade_manager import get_trade_history, calculate_historical_context
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +74,14 @@ def get_signal(df_15m, df_5m):
         
         entry = latest["close"]
         
+        # Dynamic features
+        now = datetime.now()
+        hour = now.hour
+        day_of_week = now.weekday()
+        
+        history = get_trade_history()
+        context = calculate_historical_context(history) if len(history) >= 5 else {}
+        
         ai_prob = 50.0
         if USE_XGBOOST:
             trade_features = {
@@ -83,31 +93,31 @@ def get_signal(df_15m, df_5m):
                 'atr': float(atr),
                 'qty': 1.0,
                 'risk_reward': 1.5,
-                'hour': 12,
-                'day_of_week': 2,
+                'hour': hour,
+                'day_of_week': day_of_week,
                 'confidence': int(0.4 * score + 0.6 * 50),
                 'ai_prob': 50.0,
                 'body_ratio': latest["body"] / max(atr, 0.0001),
                 'volume_strength': latest["volume"] / max(latest["volume_ma"], 0.0001),
                 'atr_expansion': float(atr),
                 'confluence_count': sum([latest["volume_spike"], latest["displacement"], bull_sweep or bear_sweep, bull_fvg or bear_fvg]),
-                'is_london_open': 0,
-                'is_ny_open': 0,
-                'is_asian': 0,
-                'is_overlap': 0,
-                'is_quiet_time': 0,
-                'is_monday': 0,
-                'is_friday': 0,
-                'is_scalp': 0,
-                'is_swing': 0,
+                'is_london_open': 1 if 7 <= hour <= 11 else 0,
+                'is_ny_open': 1 if 12 <= hour <= 16 else 0,
+                'is_asian': 1 if (hour >= 22 or hour <= 6) else 0,
+                'is_overlap': 1 if 8 <= hour <= 11 else 0,
+                'is_quiet_time': 1 if 17 <= hour <= 21 else 0,
+                'is_monday': 1 if day_of_week == 0 else 0,
+                'is_friday': 1 if day_of_week == 4 else 0,
+                'is_scalp': 1 if 1.5 < 1.8 else 0,
+                'is_swing': 1 if 1.5 >= 2.0 else 0,
                 'qty_size': 0.0,
                 'trade_duration_hours': 1,
                 'sl_tightness': 0.01,
-                'recent_win_rate': 0.5,
-                'streak_count': 0,
-                'is_hot_streak': 0,
-                'cumulative_pnl': 0,
-                'current_dd_pct': 0,
+                'recent_win_rate': context.get('recent_win_rate', 0.5),
+                'streak_count': context.get('streak_count', 0),
+                'is_hot_streak': 1 if context.get('streak_count', 0) > 0 else 0,
+                'cumulative_pnl': context.get('cumulative_pnl', 0),
+                'current_dd_pct': context.get('current_dd_pct', 0),
                 'volume_x_displacement': latest["volume_spike"] * latest["displacement"],
                 'confluence_x_confidence': 0,
                 'sweep_x_fvg': (1 if (bull_sweep or bear_sweep) else 0) * (1 if (bull_fvg or bear_fvg) else 0),
@@ -119,7 +129,7 @@ def get_signal(df_15m, df_5m):
             }
             ai_prob = get_xgboost_probability(trade_features)
         
-        final_confidence = int(0.6 * score + 0.4 * ai_prob)  # AI 60%
+        final_confidence = int(0.4 * score + 0.6 * ai_prob)  # AI 60%
         
         logger.info(
             f"Signal check | trend_bull={trend_bull} | trend_bear={trend_bear} | "
