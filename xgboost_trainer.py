@@ -275,7 +275,8 @@ def get_xgboost_probability(trade_features):
 
     try:
         model = joblib.load(MODEL_PATH)
-        feature_names = joblib.load("models/feature_names.pkl")
+        feature_names = joblib.load("data/models/feature_names.pkl")  # ✅ CORRECT
+
         
         X = pd.DataFrame([trade_features])
         X = X[feature_names]
