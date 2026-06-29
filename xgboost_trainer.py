@@ -231,7 +231,8 @@ def train_model_incremental():
     model.fit(X, y, verbose=0)
 
     joblib.dump(model, MODEL_PATH)
-    joblib.dump(X.columns.tolist(), "models/feature_names.pkl")
+    joblib.dump(X.columns.tolist(), "data/models/feature_names.pkl")
+
     
     accuracy = model.score(X, y)
     win_count = (y == 1).sum()
