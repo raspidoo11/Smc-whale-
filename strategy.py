@@ -47,7 +47,6 @@ def get_signal(df_15m, df_5m):
         if pd.isna(atr) or atr <= 0:
             return None
         
-        # Enhanced SMC Tools
         bull_sweep = (
             latest["low"] < df_5m["low"].iloc[-10:-1].min()
             and latest["close"] > latest["open"]
@@ -60,36 +59,18 @@ def get_signal(df_15m, df_5m):
         bull_fvg = df_5m["low"].iloc[-1] > df_5m["high"].iloc[-3]
         bear_fvg = df_5m["high"].iloc[-1] < df_5m["low"].iloc[-3]
         
-        # Simple Order Block
-        ob_bull = False
-        ob_bear = False
-        if len(df_5m) >= 5:
-            if trend_bull and df_5m["close"].iloc[-2] < df_5m["open"].iloc[-2]:
-                ob_bull = True
-            if trend_bear and df_5m["close"].iloc[-2] > df_5m["open"].iloc[-2]:
-                ob_bear = True
-        
-        # Liquidity Sweep
-        bull_liquidity = latest["low"] < df_5m["low"].iloc[-15:-1].min()
-        bear_liquidity = latest["high"] > df_5m["high"].iloc[-15:-1].max()
-        
-        # Scoring
         score = 0
         if latest["volume_spike"] == 1:
             score += 25
         if latest["displacement"] == 1:
-            score += 25
+            score += 20
         if trend_bull:
-            score += 20
+            score += 15
         if trend_bear:
-            score += 20
+            score += 15
         if bull_sweep or bear_sweep:
-            score += 20
+            score += 15
         if bull_fvg or bear_fvg:
-            score += 15
-        if ob_bull or ob_bear:
-            score += 15
-        if bull_liquidity or bear_liquidity:
             score += 10
         
         entry = latest["close"]
@@ -151,10 +132,8 @@ def get_signal(df_15m, df_5m):
         )
         
         if trend_bull and final_confidence >= 50:
-            # Tight SL for scalping + structure
-            swing_low = df_5m["low"].iloc[-8:-1].min()
-            sl = min(swing_low * 0.9995, entry - atr * 0.8)
-            tp = entry + (entry - sl) * 1.5   # 1.5 RR
+            sl = entry - atr
+            tp = entry + (entry - sl) * 1.5
             
             return {
                 "direction": "LONG",
@@ -165,13 +144,12 @@ def get_signal(df_15m, df_5m):
                 "ai_prob": ai_prob,
                 "volume_spike": latest["volume_spike"],
                 "displacement": latest["displacement"],
-                "sweep": 1 if bull_sweep else 0,
-                "fvg": 1 if bull_fvg else 0
+                "sweep": 1 if (bull_sweep or bear_sweep) else 0,
+                "fvg": 1 if (bull_fvg or bear_fvg) else 0
             }
         
         if trend_bear and final_confidence >= 50:
-            swing_high = df_5m["high"].iloc[-8:-1].max()
-            sl = max(swing_high * 1.0005, entry + atr * 0.8)
+            sl = entry + atr
             tp = entry - (sl - entry) * 1.5
             
             return {
@@ -183,8 +161,8 @@ def get_signal(df_15m, df_5m):
                 "ai_prob": ai_prob,
                 "volume_spike": latest["volume_spike"],
                 "displacement": latest["displacement"],
-                "sweep": 1 if bear_sweep else 0,
-                "fvg": 1 if bear_fvg else 0
+                "sweep": 1 if (bull_sweep or bear_sweep) else 0,
+                "fvg": 1 if (bull_fvg or bear_fvg) else 0
             }
         
         return None
