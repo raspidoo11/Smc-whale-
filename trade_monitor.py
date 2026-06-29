@@ -9,7 +9,7 @@ from trade_manager import (
     get_balance
 )
 from telegram_alerts import send_alert
-from xgboost_continuous_learning import train_model_incremental
+from xgboost_trainer import train_model_incremental
 
 logger = logging.getLogger(__name__)
 
@@ -53,7 +53,6 @@ async def monitor_trades():
             logger.warning(f"Failed to get price for {symbol}")
             continue
         
-        # ===== TRAILING ACTIVATION (No break-even) =====
         if not trade.get("trail_active", False):
             if direction == "LONG":
                 trigger = entry + ((tp - entry) * 0.75)
@@ -67,7 +66,7 @@ async def monitor_trades():
                         f"<b>{symbol}</b>\n\n"
                         f"Now following price upward at 0.5% trail"
                     )
-            else:  # SHORT
+            else:
                 trigger = entry - ((entry - tp) * 0.75)
                 
                 if current_price <= trigger:
@@ -80,10 +79,9 @@ async def monitor_trades():
                         f"Now following price downward at 0.5% trail"
                     )
         
-        # ===== MOVE TRAILING SL =====
         if trade.get("trail_active", False):
             if direction == "LONG":
-                new_sl = current_price * 0.995  # 0.5% trail
+                new_sl = current_price * 0.995
                 
                 if new_sl > trade["sl"]:
                     old_sl = trade["sl"]
@@ -91,8 +89,8 @@ async def monitor_trades():
                     modified = True
                     logger.info(f"TRAIL UPDATE: {symbol} SL ${old_sl:.6f} → ${new_sl:.6f}")
             
-            else:  # SHORT
-                new_sl = current_price * 1.005  # 0.5% trail
+            else:
+                new_sl = current_price * 1.005
                 
                 if new_sl < trade["sl"]:
                     old_sl = trade["sl"]
@@ -100,7 +98,6 @@ async def monitor_trades():
                     modified = True
                     logger.info(f"TRAIL UPDATE: {symbol} SL ${old_sl:.6f} → ${new_sl:.6f}")
         
-        # ===== CHECK TP / SL HIT =====
         sl = float(trade["sl"])
         
         if direction == "LONG":
@@ -108,7 +105,7 @@ async def monitor_trades():
             hit_tp = current_price >= tp
             hit_sl = current_price <= sl
         
-        else:  # SHORT
+        else:
             pnl = (entry - current_price) * qty
             hit_tp = current_price <= tp
             hit_sl = current_price >= sl
@@ -116,13 +113,11 @@ async def monitor_trades():
         if hit_tp or hit_sl:
             result = "WIN" if hit_tp else "LOSS"
             
-            # Close the trade
             close_trade(symbol, current_price, result)
             update_balance(pnl)
             
             balance = get_balance()["balance"]
             
-            # Exit alert
             status_emoji = "✅" if hit_tp else "❌"
             exit_type = "Take Profit Hit" if hit_tp else "Stop Loss Hit"
             pnl_sign = "+" if pnl >= 0 else ""
@@ -137,7 +132,6 @@ async def monitor_trades():
                 f"💰 Balance: <b>${balance:.2f}</b>"
             )
             
-            # ===== CONTINUOUS LEARNING: Retrain after each trade =====
             logger.info(f"\n🤖 LEARNING FROM TRADE #{trade_no}...")
             train_model_incremental()
             logger.info(f"✅ Model updated with new trade data\n")
@@ -145,7 +139,6 @@ async def monitor_trades():
             closed_indices.append(idx)
             modified = True
     
-    # Save updated trades
     if modified:
         updated_trades = [t for i, t in enumerate(trades) if i not in closed_indices]
         save_open_trades(updated_trades)
