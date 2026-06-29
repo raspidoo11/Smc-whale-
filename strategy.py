@@ -1,22 +1,27 @@
 import pandas as pd
 import logging
 import os
-from xgboost_trainer import get_xgboost_probability
 
 logger = logging.getLogger(__name__)
 
 USE_XGBOOST = os.getenv("USE_XGBOOST", "false").lower() == "true"
 
+try:
+    from xgboost_continuous_learning import get_xgboost_probability
+except ImportError:
+    try:
+        from xgboost_trainer import get_xgboost_probability
+    except ImportError:
+        def get_xgboost_probability(features):
+            return 50.0
+
 def calculate_features(df):
     df = df.copy()
-    
     df["atr"] = (df["high"] - df["low"]).rolling(14).mean()
     df["volume_ma"] = df["volume"].rolling(20).mean()
     df["volume_spike"] = (df["volume"] > df["volume_ma"] * 1.5).astype(int)
-    
     df["body"] = abs(df["close"] - df["open"])
     df["displacement"] = (df["body"] > df["atr"] * 0.7).astype(int)
-    
     return df
 
 def bullish_bos(df):
@@ -55,7 +60,6 @@ def get_signal(df_15m, df_5m):
         bear_fvg = df_5m["high"].iloc[-1] < df_5m["low"].iloc[-3]
         
         score = 0
-        
         if latest["volume_spike"] == 1:
             score += 25
         if latest["displacement"] == 1:
@@ -71,7 +75,6 @@ def get_signal(df_15m, df_5m):
         
         entry = latest["close"]
         
-        # XGBoost probability
         ai_prob = 50.0
         
         if USE_XGBOOST:
