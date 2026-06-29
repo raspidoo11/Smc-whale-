@@ -65,7 +65,7 @@ def get_signal(df_15m, df_5m):
             trade_features = { ... }  # your existing features dict
             ai_prob = get_xgboost_probability(trade_features)
         
-        final_confidence = int(0.4 * score + 0.6 * ai_prob)   # AI 60%
+        final_confidence = int(0.6 * score + 0.4 * ai_prob)   # AI 60%
         
         logger.info(f"Signal check | SMC={score} | AI={ai_prob:.1f} | Final={final_confidence}")
         
