@@ -2,11 +2,7 @@ import asyncio
 import schedule
 import time
 import logging
-import os
-import threading
 from datetime import datetime
-from http.server import HTTPServer, BaseHTTPRequestHandler
-
 from scanner import get_top_symbols, get_ohlcv
 from strategy import get_signal
 from paper_trader import calculate_qty
@@ -21,7 +17,7 @@ from trade_manager import (
     reset_daily_pnl
 )
 from trade_monitor import monitor_trades
-from xgboost_trainer import train_model_incremental as train_model
+from xgboost_trainer import train_model_incremental
 from trade_manager import get_trade_history
 
 logging.basicConfig(
@@ -30,41 +26,25 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-
-# ==================== RAILWAY HEALTHCHECK SERVER ====================
-class HealthHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-type", "text/plain")
-        self.end_headers()
-        self.wfile.write(b"OK - SMC Whale AI is running")
-
-def run_health_server():
-    port = int(os.getenv("PORT", 8080))
-    server = HTTPServer(("", port), HealthHandler)
-    logger.info(f"Healthcheck server listening on port {port}")
-    server.serve_forever()
-
-# Start healthcheck in background thread (daemon = dies with main process)
-threading.Thread(target=run_health_server, daemon=True).start()
-# ====================================================================
-
-
 exchange = get_exchange()
 
 
 async def scan():
+    """
+    Scan for signals every 5 minutes
+    Rate limited to avoid API blocks
+    """
     await monitor_trades()
     
     try:
-        logger.info("Starting signal scan...")
+        logger.info("🔍 Starting signal scan (5-minute interval)...")
         
         if not trading_allowed():
             logger.info("Daily loss limit reached. Trading paused for today.")
             return
         
-        symbols = get_top_symbols(20)
-        logger.info(f"Found {len(symbols)} symbols")
+        symbols = get_top_symbols(30)
+        logger.info(f"Scanning {len(symbols)} quality coins")
         
         results = []
         
@@ -82,7 +62,7 @@ async def scan():
                     qty = calculate_qty(signal["entry"], signal["sl"])
                     signal["qty"] = qty
                     results.append({"symbol": symbol, **signal})
-                    logger.info(f"SIGNAL FOUND: {symbol} {signal['direction']} conf={signal.get('confidence', 0)}")
+                    logger.info(f"🟢 SIGNAL FOUND: {symbol} {signal['direction']} conf={signal.get('confidence', 0)}")
             
             except Exception as e:
                 logger.exception(f"Symbol failed: {symbol} | {e}")
@@ -142,13 +122,14 @@ async def scan():
             )
         
         if len(get_trade_history()) >= 10:
-            train_model()
+            train_model_incremental()
     
     except Exception as e:
         logger.exception(f"SCAN FAILED: {e}")
 
 
 async def run_monitor():
+    """Monitor trades - runs independently every 35 seconds"""
     try:
         await monitor_trades()
     except Exception as e:
@@ -156,11 +137,11 @@ async def run_monitor():
 
 
 async def startup():
-    await send_alert("🚀 <b>SMC Whale AI Started (Paper Mode)</b>")
+    await send_alert("🚀 <b>SMC Whale AI Started (Paper Mode)</b>\n\nQuality coins only - No meme coins!")
 
 
 def heartbeat():
-    logger.info("Worker Alive")
+    logger.info("💚 Worker Alive")
 
 
 def daily_reset():
@@ -178,7 +159,7 @@ def run_scan_sync():
 
 
 def run_monitor_sync():
-    """Wrapper to run async monitor"""
+    """Wrapper to run async monitor - RUNS EVERY 35 SECONDS"""
     try:
         asyncio.run(run_monitor())
     except Exception as e:
@@ -187,6 +168,9 @@ def run_monitor_sync():
 
 def main():
     logger.info("🚀 Starting SMC Whale AI - PAPER Mode")
+    logger.info("📊 Scanning 30 quality coins (no meme coins)")
+    logger.info("⏱️  Scan interval: 5 minutes (rate limited)")
+    logger.info("🔍 Monitor interval: 35 seconds (catch exits fast)")
     
     # Initial startup
     asyncio.run(startup())
@@ -197,15 +181,20 @@ def main():
     # Initial monitor
     run_monitor_sync()
     
-    # Schedule jobs
+    # ===== SCHEDULE JOBS =====
+    # Heartbeat every minute
     schedule.every(1).minutes.do(heartbeat)
-    schedule.every(45).seconds.do(run_monitor_sync)
-    schedule.every(2).minutes.do(run_scan_sync)
     
-    # Daily reset at midnight UTC
+    # Monitor every 35 seconds (FAST - catch exits quickly!)
+    schedule.every(35).seconds.do(run_monitor_sync)
+    
+    # Scan every 5 minutes (RATE LIMITED - avoid API blocks)
+    schedule.every(5).minutes.do(run_scan_sync)
+    
+    # Daily reset at midnight
     schedule.every().day.at("00:00").do(daily_reset)
     
-    logger.info("Scheduler initialized")
+    logger.info("✅ Scheduler initialized")
     logger.info("Loss limit: -$15 (15% drawdown from $100)")
     logger.info("Profit cap: UNLIMITED ✅")
     logger.info("Daily reset: 00:00 UTC")
