@@ -26,7 +26,19 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-exchange = get_exchange()
+exchange = get_exchange() 
+
+from pathlib import Path
+import os
+
+MODEL_PATH = "/app/data/models/xgboost_model.pkl"
+
+logger.info(f"📁 STARTUP CHECK → Model file exists: {Path(MODEL_PATH).exists()}")
+
+if os.path.exists("/app/data/models"):
+    logger.info(f"📁 Files in /app/data/models/: {os.listdir('/app/data/models/')}")
+else:
+    logger.info("📁 /app/data/models/ folder does not exist yet")
 
 
 async def scan():
