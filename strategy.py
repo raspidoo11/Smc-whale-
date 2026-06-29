@@ -25,12 +25,10 @@ def calculate_features(df):
     return df
 
 def bullish_bos(df):
-    recent_high = df["high"].iloc[-15:-1].max()
-    return df["close"].iloc[-1] > recent_high * 0.999
+    return df["close"].iloc[-1] > df["high"].iloc[-10:-1].max()
 
 def bearish_bos(df):
-    recent_low = df["low"].iloc[-15:-1].min()
-    return df["close"].iloc[-1] < recent_low * 1.001
+    return df["close"].iloc[-1] < df["low"].iloc[-10:-1].min()
 
 def get_signal(df_15m, df_5m):
     try:
@@ -49,17 +47,13 @@ def get_signal(df_15m, df_5m):
         if pd.isna(atr) or atr <= 0:
             return None
         
-        # Candle direction alignment
-        is_bull_candle = latest["close"] > latest["open"]
-        is_bear_candle = latest["close"] < latest["open"]
-        
         bull_sweep = (
-            latest["low"] < df_5m["low"].iloc[-12:-1].min()
-            and is_bull_candle
+            latest["low"] < df_5m["low"].iloc[-10:-1].min()
+            and latest["close"] > latest["open"]
         )
         bear_sweep = (
-            latest["high"] > df_5m["high"].iloc[-12:-1].max()
-            and is_bear_candle
+            latest["high"] > df_5m["high"].iloc[-10:-1].max()
+            and latest["close"] < latest["open"]
         )
         
         bull_fvg = df_5m["low"].iloc[-1] > df_5m["high"].iloc[-3]
@@ -69,13 +63,13 @@ def get_signal(df_15m, df_5m):
         if latest["volume_spike"] == 1:
             score += 25
         if latest["displacement"] == 1:
-            score += 25
+            score += 20
         if trend_bull:
             score += 15
         if trend_bear:
             score += 15
         if bull_sweep or bear_sweep:
-            score += 20
+            score += 15
         if bull_fvg or bear_fvg:
             score += 10
         
@@ -137,10 +131,11 @@ def get_signal(df_15m, df_5m):
             f"XGBoost={'ON' if USE_XGBOOST else 'OFF'}"
         )
         
-        # Aligned entry logic
-        if trend_bull and is_bull_candle and final_confidence >= 45:
-            sl = entry - atr * 1.1
-            tp = entry + (entry - sl) * 1.5
+        if trend_bull and final_confidence >= 50:
+            # Structure-based SL/TP
+            swing_low = df_5m["low"].iloc[-12:-1].min()
+            sl = min(swing_low * 0.999, entry - atr)
+            tp = entry + (entry - sl) * 2.0   # 2:1 RR targeting next structure
             
             return {
                 "direction": "LONG",
@@ -155,9 +150,11 @@ def get_signal(df_15m, df_5m):
                 "fvg": 1 if (bull_fvg or bear_fvg) else 0
             }
         
-        if trend_bear and is_bear_candle and final_confidence >= 45:
-            sl = entry + atr * 1.1
-            tp = entry - (sl - entry) * 1.5
+        if trend_bear and final_confidence >= 50:
+            # Structure-based SL/TP
+            swing_high = df_5m["high"].iloc[-12:-1].max()
+            sl = max(swing_high * 1.001, entry + atr)
+            tp = entry - (sl - entry) * 2.0
             
             return {
                 "direction": "SHORT",
