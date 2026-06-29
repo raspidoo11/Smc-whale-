@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from exchange import get_exchange
 from trade_manager import (
     get_open_trades,
@@ -8,6 +9,7 @@ from trade_manager import (
     get_balance
 )
 from telegram_alerts import send_alert
+from xgboost_continuous_learning import train_model_incremental
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +32,6 @@ async def monitor_trades():
     modified = False
     logger.info(f"Monitoring {len(trades)} trades")
     
-    # Track indices to avoid index shifting during iteration
     closed_indices = []
     
     for idx, trade in enumerate(trades):
@@ -52,15 +53,9 @@ async def monitor_trades():
             logger.warning(f"Failed to get price for {symbol}")
             continue
         
-        # ===== BREAK EVEN REMOVED =====
-        # Small pullbacks were hitting SL on scalps before reaching TP
-        # Removed entirely to avoid scratch trades
-        
-        # ===== TRAILING ACTIVATION =====
-        # Only activate trail when trade is significantly in profit
+        # ===== TRAILING ACTIVATION (No break-even) =====
         if not trade.get("trail_active", False):
             if direction == "LONG":
-                # Activate at 75% of the way to TP
                 trigger = entry + ((tp - entry) * 0.75)
                 
                 if current_price >= trigger:
@@ -73,7 +68,6 @@ async def monitor_trades():
                         f"Now following price upward at 0.5% trail"
                     )
             else:  # SHORT
-                # Activate at 75% of the way to TP
                 trigger = entry - ((entry - tp) * 0.75)
                 
                 if current_price <= trigger:
@@ -107,7 +101,7 @@ async def monitor_trades():
                     logger.info(f"TRAIL UPDATE: {symbol} SL ${old_sl:.6f} → ${new_sl:.6f}")
         
         # ===== CHECK TP / SL HIT =====
-        sl = float(trade["sl"])  # Re-read in case it was updated by trailing
+        sl = float(trade["sl"])
         
         if direction == "LONG":
             pnl = (current_price - entry) * qty
@@ -128,7 +122,7 @@ async def monitor_trades():
             
             balance = get_balance()["balance"]
             
-            # Exit alert with trade number
+            # Exit alert
             status_emoji = "✅" if hit_tp else "❌"
             exit_type = "Take Profit Hit" if hit_tp else "Stop Loss Hit"
             pnl_sign = "+" if pnl >= 0 else ""
@@ -143,13 +137,16 @@ async def monitor_trades():
                 f"💰 Balance: <b>${balance:.2f}</b>"
             )
             
-            # Mark for removal
+            # ===== CONTINUOUS LEARNING: Retrain after each trade =====
+            logger.info(f"\n🤖 LEARNING FROM TRADE #{trade_no}...")
+            train_model_incremental()
+            logger.info(f"✅ Model updated with new trade data\n")
+            
             closed_indices.append(idx)
             modified = True
     
     # Save updated trades
     if modified:
-        # Filter out closed trades
         updated_trades = [t for i, t in enumerate(trades) if i not in closed_indices]
         save_open_trades(updated_trades)
         logger.info(f"Trades updated. Remaining open: {len(updated_trades)}")
