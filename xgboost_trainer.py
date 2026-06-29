@@ -10,9 +10,10 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = "models/xgboost_model.pkl"
-TRADE_ANALYSIS_PATH = "models/trade_analysis.json"
-os.makedirs("models", exist_ok=True)
+13  MODEL_PATH = "data/models/xgboost_model.pkl"
+14  TRADE_ANALYSIS_PATH = "data/models/trade_analysis.json"
+15  os.makedirs("data/models", exist_ok=True)
+
 
 
 def extract_pro_features_from_trade(trade, historical_context=None):
