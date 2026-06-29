@@ -2,7 +2,11 @@ import asyncio
 import schedule
 import time
 import logging
+import os
+import threading
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 from scanner import get_top_symbols, get_ohlcv
 from strategy import get_signal
 from paper_trader import calculate_qty
@@ -25,6 +29,26 @@ logging.basicConfig(
     format="%(asctime)s | %(levelname)s | %(message)s"
 )
 logger = logging.getLogger(__name__)
+
+
+# ==================== RAILWAY HEALTHCHECK SERVER ====================
+class HealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"OK - SMC Whale AI is running")
+
+def run_health_server():
+    port = int(os.getenv("PORT", 8080))
+    server = HTTPServer(("", port), HealthHandler)
+    logger.info(f"Healthcheck server listening on port {port}")
+    server.serve_forever()
+
+# Start healthcheck in background thread (daemon = dies with main process)
+threading.Thread(target=run_health_server, daemon=True).start()
+# ====================================================================
+
 
 exchange = get_exchange()
 
@@ -93,7 +117,6 @@ async def scan():
             
             add_trade(trade_data)
             
-            # IMPROVED: Added text labels with emojis
             await send_alert(
                 f"""
 🟢 <b>#{trade_no}</b>
