@@ -2,7 +2,6 @@ import pandas as pd
 import logging
 import os
 from xgboost_trainer import get_xgboost_probability
-from telegram_alerts import send_alert
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +46,7 @@ def get_signal(df_15m, df_5m):
         if pd.isna(atr) or atr <= 0:
             return None
 
-        # Volume Filter (stronger filter)
+        # Volume Filter
         if latest["volume_spike"] == 0 and latest["displacement"] == 0:
             return None
 
@@ -94,19 +93,25 @@ def get_signal(df_15m, df_5m):
             }
             ai_prob = get_xgboost_probability(trade_features)
 
-            await send_alert(
-                f"🤖 XGBoost Active\n\n"
-                f"AI Win Prob: {ai_prob}%\n"
-                f"Use this for better signal selection"
-            )
+            # Non-async alert
+            try:
+                from telegram_alerts import send_alert
+                import asyncio
+                asyncio.create_task(send_alert(
+                    f"🤖 XGBoost Active\n\n"
+                    f"AI Win Prob: {ai_prob}%\n"
+                    f"Signal quality improved"
+                ))
+            except:
+                pass
 
         final_confidence = int(0.6 * score + 0.4 * ai_prob)
 
         logger.info(f"Signal check | trend_bull={trend_bull} | SMC_score={score} | AI={ai_prob} | Final={final_confidence} | XGBoost={'ON' if USE_XGBOOST else 'OFF'}")
 
         if trend_bull and final_confidence >= 50:
-            sl = entry - (atr * 1.5)   # Wider SL
-            tp = entry + (entry - sl) * 2.0   # 2:1 RR
+            sl = entry - (atr * 1.5)
+            tp = entry + (entry - sl) * 2.0
             return {
                 "direction": "LONG",
                 "confidence": final_confidence,
@@ -118,18 +123,4 @@ def get_signal(df_15m, df_5m):
 
         if trend_bear and final_confidence >= 50:
             sl = entry + (atr * 1.5)
-            tp = entry - (sl - entry) * 2.0
-            return {
-                "direction": "SHORT",
-                "confidence": final_confidence,
-                "entry": float(entry),
-                "sl": float(sl),
-                "tp": float(tp),
-                "ai_prob": ai_prob
-            }
-
-        return None
-
-    except Exception as e:
-        logger.exception(f"Signal error: {e}")
-        return None
+            tp = entry - (sl
