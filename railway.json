@@ -6,5 +6,11 @@
   "deploy": {
     "numReplicas": 1,
     "startCommand": "python main.py"
-  }
+  },
+  "volumes": [
+    {
+      "name": "app-storage",
+      "mountPath": "/app/data"
+    }
+  ]
 }
