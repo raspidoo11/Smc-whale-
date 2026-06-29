@@ -24,7 +24,6 @@ def calculate_features(df):
     df["displacement"] = (df["body"] > df["atr"] * 0.7).astype(int)
     return df
 
-# More aggressive BOS
 def bullish_bos(df):
     recent_high = df["high"].iloc[-15:-1].max()
     return df["close"].iloc[-1] > recent_high * 0.999
@@ -50,13 +49,17 @@ def get_signal(df_15m, df_5m):
         if pd.isna(atr) or atr <= 0:
             return None
         
+        # Candle direction alignment
+        is_bull_candle = latest["close"] > latest["open"]
+        is_bear_candle = latest["close"] < latest["open"]
+        
         bull_sweep = (
             latest["low"] < df_5m["low"].iloc[-12:-1].min()
-            and latest["close"] > latest["open"]
+            and is_bull_candle
         )
         bear_sweep = (
             latest["high"] > df_5m["high"].iloc[-12:-1].max()
-            and latest["close"] < latest["open"]
+            and is_bear_candle
         )
         
         bull_fvg = df_5m["low"].iloc[-1] > df_5m["high"].iloc[-3]
@@ -66,13 +69,13 @@ def get_signal(df_15m, df_5m):
         if latest["volume_spike"] == 1:
             score += 25
         if latest["displacement"] == 1:
-            score += 25   # Boosted for early momentum
+            score += 25
         if trend_bull:
             score += 15
         if trend_bear:
             score += 15
         if bull_sweep or bear_sweep:
-            score += 20   # Boosted
+            score += 20
         if bull_fvg or bear_fvg:
             score += 10
         
@@ -134,8 +137,8 @@ def get_signal(df_15m, df_5m):
             f"XGBoost={'ON' if USE_XGBOOST else 'OFF'}"
         )
         
-        # Aggressive entry logic
-        if (trend_bull or latest["displacement"] == 1) and final_confidence >= 40:
+        # Aligned entry logic
+        if trend_bull and is_bull_candle and final_confidence >= 45:
             sl = entry - atr * 1.1
             tp = entry + (entry - sl) * 1.5
             
@@ -152,7 +155,7 @@ def get_signal(df_15m, df_5m):
                 "fvg": 1 if (bull_fvg or bear_fvg) else 0
             }
         
-        if (trend_bear or latest["displacement"] == 1) and final_confidence >= 40:
+        if trend_bear and is_bear_candle and final_confidence >= 45:
             sl = entry + atr * 1.1
             tp = entry - (sl - entry) * 1.5
             
