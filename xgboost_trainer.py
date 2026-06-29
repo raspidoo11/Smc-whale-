@@ -10,15 +10,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = "data/models/xgboost_model.pkl"
-TRADE_ANALYSIS_PATH = "data/models/trade_analysis.json"
-os.makedirs("data/models", exist_ok=True)
+MODEL_PATH = "/app/data/models/xgboost_model.pkl"
+FEATURE_PATH = "/app/data/models/feature_names.pkl"
 
-
+os.makedirs("/app/data/models", exist_ok=True)
 
 def extract_pro_features_from_trade(trade, historical_context=None):
-    """Professional feature engineering for pro trader thinking"""
-
+    """Your original full function"""
     features = {
         'volume_spike': trade.get('volume_spike', 0),
         'displacement': trade.get('displacement', 0),
@@ -100,8 +98,7 @@ def extract_pro_features_from_trade(trade, historical_context=None):
 
 
 def calculate_historical_context(history):
-    """Calculate context metrics from trade history"""
-    
+    """Your original function"""
     if len(history) < 5:
         return {
             'recent_win_rate': 0.5,
@@ -150,8 +147,7 @@ def calculate_historical_context(history):
 
 
 def analyze_exit(trade):
-    """Analyze WHY a trade exited (SL vs TP)"""
-    
+    """Your original function"""
     analysis = {
         'trade_no': trade.get('trade_no'),
         'symbol': trade.get('symbol'),
@@ -177,7 +173,6 @@ def analyze_exit(trade):
 
 def train_model_incremental():
     """Retrain model after EACH trade closes"""
-    
     history = get_trade_history()
     
     if len(history) < 5:
@@ -193,11 +188,6 @@ def train_model_incremental():
         if trade.get("status") in ["WIN", "LOSS"]:
             feat = extract_pro_features_from_trade(trade, context)
             feat['target'] = 1 if trade["status"] == "WIN" else 0
-            
-            exit_analysis = analyze_exit(trade)
-            feat['exit_reason'] = exit_analysis['reason']
-            feat['hit_adversity'] = exit_analysis['hit_adversity']
-            
             data.append(feat)
 
     if len(data) < 5:
@@ -207,9 +197,8 @@ def train_model_incremental():
     X = df.drop('target', axis=1, errors='ignore')
     y = df['target']
 
-    # === FIX: Convert to pure numeric features (removes strings like 'exit_reason') ===
     X = X.select_dtypes(include=[np.number]).copy()
-    X = X.fillna(0)  # Fill any NaNs
+    X = X.fillna(0)
 
     logger.info(f"Training with {X.shape[1]} numeric features")
 
@@ -231,13 +220,12 @@ def train_model_incremental():
     model.fit(X, y, verbose=0)
 
     joblib.dump(model, MODEL_PATH)
-    joblib.dump(X.columns.tolist(), "data/models/feature_names.pkl")
-
+    joblib.dump(X.columns.tolist(), FEATURE_PATH)
     
     accuracy = model.score(X, y)
     win_count = (y == 1).sum()
     loss_count = (y == 0).sum()
-    win_rate = (y == 1).sum() / len(y)
+    win_rate = win_count / len(y)
     
     feature_importance = pd.DataFrame({
         'feature': X.columns,
@@ -271,21 +259,20 @@ def get_xgboost_probability(trade_features):
     """Get AI probability for a trade setup"""
     
     if not Path(MODEL_PATH).exists():
-        return 50.0
-
+        logger.warning("Model not found — forcing retrain")
+        train_model_incremental()
+    
     try:
         model = joblib.load(MODEL_PATH)
-        feature_names = joblib.load("data/models/feature_names.pkl")  # ✅ CORRECT
-
+        feature_names = joblib.load(FEATURE_PATH)
         
         X = pd.DataFrame([trade_features])
         X = X[feature_names]
+        X = X.select_dtypes(include=[np.number]).fillna(0)
         
         prob = model.predict_proba(X)[0][1] * 100
-        
-        logger.debug(f"AI Probability: {prob:.1f}%")
         return round(prob, 1)
         
     except Exception as e:
-        logger.error(f"XGBoost prediction failed: {e}")
+        logger.error(f"XGBoost prediction failed: {e} — using 50.0")
         return 50.0
