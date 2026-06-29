@@ -2,11 +2,12 @@ import pandas as pd
 import numpy as np
 import logging
 import joblib
-from trade_manager import get_trade_history
 import os
+
 from pathlib import Path
-from xgboost import XGBClassifier
 from datetime import datetime
+from xgboost import XGBClassifier
+from trade_manager import get_trade_history
 
 logger = logging.getLogger(__name__)
 
@@ -17,82 +18,90 @@ os.makedirs("/app/data/models", exist_ok=True)
 
 
 def extract_pro_features_from_trade(trade, historical_context=None):
-    """Extract features WITHOUT feeding model its own previous predictions"""
     features = {
-        'volume_spike': trade.get('volume_spike', 0),
-        'displacement': trade.get('displacement', 0),
-        'trend_bull': 1 if trade.get('direction') == 'LONG' else 0,
-        'sweep': trade.get('sweep', 0),
-        'fvg': trade.get('fvg', 0),
+        "volume_spike": trade.get("volume_spike", 0),
+        "displacement": trade.get("displacement", 0),
+        "trend_bull": 1 if trade.get("direction") == "LONG" else 0,
+        "sweep": trade.get("sweep", 0),
+        "fvg": trade.get("fvg", 0),
     }
 
-    entry = trade.get('entry', 1)
-    sl = trade.get('sl', 0)
-    tp = trade.get('tp', 0)
-    
-    if trade.get('direction') == 'LONG':
-        risk_distance = entry - sl
-        reward_distance = tp - entry
-        adversity_ratio = risk_distance / max(reward_distance, 0.0001)
+    entry = float(trade.get("entry", 1))
+    sl = float(trade.get("sl", 0))
+    tp = float(trade.get("tp", 0))
+
+    if trade.get("direction") == "LONG":
+        risk_distance = abs(entry - sl)
+        reward_distance = abs(tp - entry)
     else:
-        risk_distance = sl - entry
-        reward_distance = entry - tp
-        adversity_ratio = risk_distance / max(reward_distance, 0.0001)
-    
-    features['adversity_ratio'] = adversity_ratio
-    features['risk_reward'] = trade.get('risk_reward', 1.5)
-    features['risk_pct'] = abs(entry - sl) / entry if entry != 0 else 0
-    features['reward_pct'] = abs(tp - entry) / entry if entry != 0 else 0
-    features['body_ratio'] = trade.get('body', 0) / max(trade.get('atr', 1), 0.0001)
-    features['volume_strength'] = trade.get('volume', 0) / max(trade.get('volume_ma', 1), 0.0001)
-    features['atr_expansion'] = trade.get('atr', 0)
+        risk_distance = abs(sl - entry)
+        reward_distance = abs(entry - tp)
 
-    confluence_score = 0
-    if trade.get('volume_spike', 0): confluence_score += 1
-    if trade.get('displacement', 0): confluence_score += 1
-    if trade.get('sweep', 0): confluence_score += 1
-    if trade.get('fvg', 0): confluence_score += 1
-    features['confluence_count'] = confluence_score
+    features["risk_reward"] = reward_distance / max(risk_distance, 0.0001)
+    features["risk_pct"] = risk_distance / max(entry, 0.0001)
+    features["reward_pct"] = reward_distance / max(entry, 0.0001)
+    features["adversity_ratio"] = risk_distance / max(reward_distance, 0.0001)
 
-    hour = trade.get('hour', 12)
-    features['hour'] = hour
-    features['is_london_open'] = 1 if 7 <= hour <= 11 else 0
-    features['is_ny_open'] = 1 if 12 <= hour <= 16 else 0
-    features['is_asian'] = 1 if (hour >= 22 or hour <= 6) else 0
-    features['is_overlap'] = 1 if 8 <= hour <= 11 else 0
-    features['is_quiet_time'] = 1 if 17 <= hour <= 21 else 0
+    atr = float(trade.get("atr", 0))
+    body = float(trade.get("body", 0))
+    volume = float(trade.get("volume", 0))
+    volume_ma = float(trade.get("volume_ma", 1))
 
-    day = trade.get('day_of_week', 2)
-    features['day_of_week'] = day
-    features['is_monday'] = 1 if day == 0 else 0
-    features['is_friday'] = 1 if day == 4 else 0
+    features["body_ratio"] = body / max(atr, 0.0001)
+    features["volume_strength"] = volume / max(volume_ma, 0.0001)
+    features["atr_expansion"] = atr
 
-    # === IMPORTANT: Removed feedback loop features ===
-    # features['confidence'], features['ai_prob'], features['smc_ai_divergence'] are deliberately NOT included
+    confluence_score = (
+        int(trade.get("volume_spike", 0))
+        + int(trade.get("displacement", 0))
+        + int(trade.get("sweep", 0))
+        + int(trade.get("fvg", 0))
+    )
 
-    features['is_scalp'] = 1 if trade.get('risk_reward', 1.5) < 1.8 else 0
-    features['is_swing'] = 1 if trade.get('risk_reward', 1.5) >= 2.0 else 0
-    features['qty_size'] = np.log1p(trade.get('qty', 1))
-    features['trade_duration_hours'] = trade.get('duration_hours', 1)
-    features['sl_tightness'] = features['risk_pct']
+    features["confluence_count"] = confluence_score
+    features["confluence_strength"] = confluence_score / 4.0
+
+    hour = int(trade.get("hour", 12))
+    day = int(trade.get("day_of_week", 2))
+
+    features["hour"] = hour
+    features["day_of_week"] = day
+
+    features["is_london_open"] = 1 if 7 <= hour <= 11 else 0
+    features["is_ny_open"] = 1 if 12 <= hour <= 16 else 0
+    features["is_asian"] = 1 if (hour >= 22 or hour <= 6) else 0
+    features["is_overlap"] = 1 if 8 <= hour <= 11 else 0
+    features["is_quiet_time"] = 1 if 17 <= hour <= 21 else 0
+
+    features["is_monday"] = 1 if day == 0 else 0
+    features["is_friday"] = 1 if day == 4 else 0
+
+    rr = features["risk_reward"]
+    features["is_scalp"] = 1 if rr < 1.8 else 0
+    features["is_swing"] = 1 if rr >= 2.0 else 0
+
+    features["qty_size"] = np.log1p(float(trade.get("qty", 1)))
+    features["trade_duration_hours"] = float(trade.get("duration_hours", 1))
+    features["sl_tightness"] = features["risk_pct"]
 
     if historical_context:
-        features['recent_win_rate'] = historical_context.get('recent_win_rate', 0.5)
-        features['streak_count'] = historical_context.get('streak_count', 0)
-        features['is_hot_streak'] = 1 if historical_context.get('streak_count', 0) > 0 else 0
-        features['cumulative_pnl'] = np.log1p(max(historical_context.get('cumulative_pnl', 0), 0.01))
-        features['current_dd_pct'] = historical_context.get('current_dd_pct', 0)
+        features["recent_win_rate"] = historical_context.get("recent_win_rate", 0.5)
+        features["streak_count"] = historical_context.get("streak_count", 0)
+        features["is_hot_streak"] = 1 if historical_context.get("streak_count", 0) > 0 else 0
+        features["cumulative_pnl"] = historical_context.get("cumulative_pnl", 0)
+        features["current_dd_pct"] = historical_context.get("current_dd_pct", 0)
     else:
-        features['recent_win_rate'] = 0.5
-        features['streak_count'] = 0
-        features['is_hot_streak'] = 0
-        features['cumulative_pnl'] = 0
-        features['current_dd_pct'] = 0
+        features["recent_win_rate"] = 0.5
+        features["streak_count"] = 0
+        features["is_hot_streak"] = 0
+        features["cumulative_pnl"] = 0
+        features["current_dd_pct"] = 0
 
-    features['volume_x_displacement'] = trade.get('volume_spike', 0) * trade.get('displacement', 0)
-    features['confluence_x_confidence'] = (confluence_score / 4.0) * (trade.get('confidence', 50) / 100.0)
-    features['sweep_x_fvg'] = trade.get('sweep', 0) * trade.get('fvg', 0)
-    features['volatility_x_risk'] = features['atr_expansion'] * features['risk_pct']
+    features["volume_x_displacement"] = (
+        trade.get("volume_spike", 0) * trade.get("displacement", 0)
+    )
+    features["sweep_x_fvg"] = trade.get("sweep", 0) * trade.get("fvg", 0)
+    features["volatility_x_risk"] = atr * features["risk_pct"]
 
     return features
 
@@ -100,105 +109,72 @@ def extract_pro_features_from_trade(trade, historical_context=None):
 def calculate_historical_context(history):
     if len(history) < 5:
         return {
-            'recent_win_rate': 0.5,
-            'streak_count': 0,
-            'cumulative_pnl': 0,
-            'current_dd_pct': 0
+            "recent_win_rate": 0.5,
+            "streak_count": 0,
+            "cumulative_pnl": 0,
+            "current_dd_pct": 0,
         }
-    
-    recent_trades = history[-10:]
-    recent_wins = sum(1 for t in recent_trades if t.get('status') == 'WIN')
-    recent_win_rate = recent_wins / len(recent_trades) if recent_trades else 0.5
-    
+
+    recent = history[-10:]
+    wins = sum(1 for t in recent if t.get("status") == "WIN")
+
     streak = 0
     streak_sign = None
+
     for trade in reversed(history):
-        is_win = trade.get('status') == 'WIN'
+        is_win = trade.get("status") == "WIN"
         if streak_sign is None:
             streak_sign = is_win
             streak = 1
-        elif (is_win and streak_sign) or (not is_win and not streak_sign):
+        elif is_win == streak_sign:
             streak += 1
         else:
             break
-    
+
     if streak_sign is False:
         streak = -streak
-    
-    cumulative_pnl = sum(t.get('pnl', 0) for t in history[-20:])
-    
-    running_pnl = []
-    cumsum = 0
-    for trade in history[-20:]:
-        cumsum += trade.get('pnl', 0)
-        running_pnl.append(cumsum)
-    
-    peak = max(running_pnl) if running_pnl else 0
-    current = running_pnl[-1] if running_pnl else 0
-    drawdown_pct = ((peak - current) / max(abs(peak), 0.01)) * 100 if peak > 0 else 0
-    
+
+    cumulative_pnl = sum(float(t.get("pnl", 0)) for t in history[-20:])
+
     return {
-        'recent_win_rate': recent_win_rate,
-        'streak_count': streak,
-        'cumulative_pnl': cumulative_pnl,
-        'current_dd_pct': drawdown_pct
+        "recent_win_rate": wins / max(len(recent), 1),
+        "streak_count": streak,
+        "cumulative_pnl": cumulative_pnl,
+        "current_dd_pct": 0,
     }
-
-
-def analyze_exit(trade):
-    analysis = {
-        'trade_no': trade.get('trade_no'),
-        'symbol': trade.get('symbol'),
-        'direction': trade.get('direction'),
-        'entry': trade.get('entry'),
-        'exit_price': trade.get('exit_price'),
-        'status': trade.get('status'),
-        'pnl': trade.get('pnl', 0),
-        'timestamp': datetime.now().isoformat()
-    }
-    
-    if trade.get('status') == 'WIN':
-        analysis['reason'] = 'TOOK_PROFIT'
-        analysis['reason_detail'] = 'Trade reached take profit target'
-        analysis['hit_adversity'] = False
-    else:
-        analysis['reason'] = 'STOP_LOSS'
-        analysis['reason_detail'] = 'Trade hit stop loss'
-        analysis['hit_adversity'] = True
-    
-    return analysis
 
 
 def train_model_incremental():
     history = get_trade_history()
-    
-    # Changed from 5 to 30 trades minimum
+
     if len(history) < 30:
-        logger.info(f"⏳ Waiting for trades to learn... ({len(history)}/30)")
+        logger.info(f"Waiting for trades ({len(history)}/30)")
         return None
 
-    logger.info(f"\n🧠 CONTINUOUS LEARNING: Training on {len(history)} trades...")
+    context = calculate_historical_context(history[:-1])
 
-    context = calculate_historical_context(history)
+    rows = []
 
-    data = []
     for trade in history:
-        if trade.get("status") in ["WIN", "LOSS"]:
-            feat = extract_pro_features_from_trade(trade, context)
-            feat['target'] = 1 if trade["status"] == "WIN" else 0
-            data.append(feat)
+        if trade.get("status") not in ["WIN", "LOSS"]:
+            continue
 
-    if len(data) < 10:
+        row = extract_pro_features_from_trade(trade, context)
+        row["target"] = 1 if trade["status"] == "WIN" else 0
+        rows.append(row)
+
+    if len(rows) < 30:
         return None
 
-    df = pd.DataFrame(data)
-    X = df.drop('target', axis=1, errors='ignore')
-    y = df['target']
+    df = pd.DataFrame(rows)
 
-    X = X.select_dtypes(include=[np.number]).copy()
-    X = X.fillna(0)
+    X = df.drop(columns=["target"])
+    X = X.select_dtypes(include=[np.number]).fillna(0)
 
-    logger.info(f"Training with {X.shape[1]} numeric features")
+    y = df["target"]
+
+    win_count = int((y == 1).sum())
+    loss_count = int((y == 0).sum())
 
     model = XGBClassifier(
         n_estimators=100,
@@ -210,67 +186,44 @@ def train_model_incremental():
         gamma=0.5,
         reg_alpha=0.3,
         reg_lambda=0.8,
+        scale_pos_weight=max(loss_count / max(win_count, 1), 1),
         random_state=42,
-        eval_metric='logloss',
-        verbosity=0
+        eval_metric="logloss",
+        verbosity=0,
     )
 
-    model.fit(X, y, verbose=0)
+    model.fit(X, y)
 
     joblib.dump(model, MODEL_PATH)
     joblib.dump(X.columns.tolist(), FEATURE_PATH)
-    
-    # Removed fake training accuracy reporting
-    win_count = (y == 1).sum()
-    loss_count = (y == 0).sum()
-    win_rate = win_count / len(y)
-    
-    feature_importance = pd.DataFrame({
-        'feature': X.columns,
-        'importance': model.feature_importances_
-    }).sort_values('importance', ascending=False)
 
-    logger.info(f"\n✅ MODEL UPDATED!")
-    logger.info(f"   Trades Learned: {len(data)} (W: {win_count}, L: {loss_count})")
-    logger.info(f"   Win Rate: {win_rate:.1%}")
-    
-    logger.info(f"\n   📊 Top 10 Features (What Model Learned):")
-    for idx, row in feature_importance.head(10).iterrows():
-        logger.info(f"      {row['feature']}: {row['importance']:.3f}")
+    logger.info(f"Model trained on {len(rows)} trades")
 
     return model
 
 
 def get_xgboost_probability(trade_features):
-    model_exists = Path(MODEL_PATH).exists()
-    logger.info(f"🔍 Model file check: {MODEL_PATH} → Exists: {model_exists}")
-    
-    if not model_exists:
-        logger.warning("Model not found — forcing retrain")
-        train_model_incremental()
-    
     try:
+        if not Path(MODEL_PATH).exists():
+            return 50.0
+
         model = joblib.load(MODEL_PATH)
         feature_names = joblib.load(FEATURE_PATH)
-        
+
         X = pd.DataFrame([trade_features])
-        
-        # Safe handling for missing features
+
         for col in feature_names:
             if col not in X.columns:
                 X[col] = 0
-        
+
         X = X[feature_names]
         X = X.select_dtypes(include=[np.number]).fillna(0)
-        
+
         prob = model.predict_proba(X)[0][1] * 100
-        
-        # Diagnostic logging
-        logger.info(f"XGB Probability Raw: {prob:.2f}")
-        logger.debug(f"Feature Values: {X.iloc[0].to_dict()}")
-        
+        prob = max(5, min(95, prob))
+
         return round(prob, 1)
-        
+
     except Exception as e:
-        logger.error(f"XGBoost prediction failed: {e} — using 50.0")
+        logger.error(f"Prediction failed: {e}")
         return 50.0
