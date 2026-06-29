@@ -17,6 +17,7 @@ os.makedirs("/app/data/models", exist_ok=True)
 
 
 def extract_pro_features_from_trade(trade, historical_context=None):
+    """Extract features WITHOUT feeding model its own previous predictions"""
     features = {
         'volume_spike': trade.get('volume_spike', 0),
         'displacement': trade.get('displacement', 0),
@@ -66,9 +67,8 @@ def extract_pro_features_from_trade(trade, historical_context=None):
     features['is_monday'] = 1 if day == 0 else 0
     features['is_friday'] = 1 if day == 4 else 0
 
-    features['confidence'] = trade.get('confidence', 50)
-    features['ai_prob'] = trade.get('ai_prob', 50)
-    features['smc_ai_divergence'] = abs(trade.get('confidence', 50) - trade.get('ai_prob', 50))
+    # === IMPORTANT: Removed feedback loop features ===
+    # features['confidence'], features['ai_prob'], features['smc_ai_divergence'] are deliberately NOT included
 
     features['is_scalp'] = 1 if trade.get('risk_reward', 1.5) < 1.8 else 0
     features['is_swing'] = 1 if trade.get('risk_reward', 1.5) >= 2.0 else 0
@@ -172,8 +172,9 @@ def analyze_exit(trade):
 def train_model_incremental():
     history = get_trade_history()
     
-    if len(history) < 5:
-        logger.info(f"⏳ Waiting for trades to learn... ({len(history)}/5)")
+    # Changed from 5 to 30 trades minimum
+    if len(history) < 30:
+        logger.info(f"⏳ Waiting for trades to learn... ({len(history)}/30)")
         return None
 
     logger.info(f"\n🧠 CONTINUOUS LEARNING: Training on {len(history)} trades...")
@@ -187,7 +188,7 @@ def train_model_incremental():
             feat['target'] = 1 if trade["status"] == "WIN" else 0
             data.append(feat)
 
-    if len(data) < 5:
+    if len(data) < 10:
         return None
 
     df = pd.DataFrame(data)
@@ -219,15 +220,23 @@ def train_model_incremental():
     joblib.dump(model, MODEL_PATH)
     joblib.dump(X.columns.tolist(), FEATURE_PATH)
     
-    accuracy = model.score(X, y)
+    # Removed fake training accuracy reporting
     win_count = (y == 1).sum()
     loss_count = (y == 0).sum()
     win_rate = win_count / len(y)
     
+    feature_importance = pd.DataFrame({
+        'feature': X.columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+
     logger.info(f"\n✅ MODEL UPDATED!")
     logger.info(f"   Trades Learned: {len(data)} (W: {win_count}, L: {loss_count})")
-    logger.info(f"   Accuracy: {accuracy:.1%}")
     logger.info(f"   Win Rate: {win_rate:.1%}")
+    
+    logger.info(f"\n   📊 Top 10 Features (What Model Learned):")
+    for idx, row in feature_importance.head(10).iterrows():
+        logger.info(f"      {row['feature']}: {row['importance']:.3f}")
 
     return model
 
@@ -245,10 +254,21 @@ def get_xgboost_probability(trade_features):
         feature_names = joblib.load(FEATURE_PATH)
         
         X = pd.DataFrame([trade_features])
+        
+        # Safe handling for missing features
+        for col in feature_names:
+            if col not in X.columns:
+                X[col] = 0
+        
         X = X[feature_names]
         X = X.select_dtypes(include=[np.number]).fillna(0)
         
         prob = model.predict_proba(X)[0][1] * 100
+        
+        # Diagnostic logging
+        logger.info(f"XGB Probability Raw: {prob:.2f}")
+        logger.debug(f"Feature Values: {X.iloc[0].to_dict()}")
+        
         return round(prob, 1)
         
     except Exception as e:
