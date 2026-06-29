@@ -2,7 +2,8 @@ import pandas as pd
 import logging
 import os
 from datetime import datetime
-from trade_manager import get_trade_history, calculate_historical_context
+from trade_manager import get_trade_history
+from xgboost_trainer import calculate_historical_context, get_xgboost_probability
 
 logger = logging.getLogger(__name__)
 
