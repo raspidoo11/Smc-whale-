@@ -167,20 +167,19 @@ def analyze_exit(trade):
         'direction': trade.get('direction'),
         'entry': trade.get('entry'),
         'exit_price': trade.get('exit_price'),
-        'status': trade.get('status'),  # WIN or LOSS
+        'status': trade.get('status'),
         'pnl': trade.get('pnl', 0),
         'timestamp': datetime.now().isoformat()
     }
     
-    # Analyze exit reason
     if trade.get('status') == 'WIN':
         analysis['reason'] = 'TOOK_PROFIT'
         analysis['reason_detail'] = 'Trade reached take profit target'
-        analysis['hit_adversity'] = False  # Didn't get hit by pullback
+        analysis['hit_adversity'] = False
     else:
         analysis['reason'] = 'STOP_LOSS'
         analysis['reason_detail'] = 'Trade hit stop loss'
-        analysis['hit_adversity'] = True  # Got stopped out
+        analysis['hit_adversity'] = True
     
     return analysis
 
@@ -208,7 +207,6 @@ def train_model_incremental():
             feat = extract_pro_features_from_trade(trade, context)
             feat['target'] = 1 if trade["status"] == "WIN" else 0
             
-            # Add exit analysis
             exit_analysis = analyze_exit(trade)
             feat['exit_reason'] = exit_analysis['reason']
             feat['hit_adversity'] = exit_analysis['hit_adversity']
@@ -222,16 +220,15 @@ def train_model_incremental():
     X = df.drop('target', axis=1)
     y = df['target']
 
-    # ===== CONTINUOUS LEARNING CONFIG =====
     model = XGBClassifier(
-        n_estimators=100,           # Smaller for incremental updates
-        learning_rate=0.1,          # Faster adaptation to new trades
+        n_estimators=100,
+        learning_rate=0.1,
         max_depth=5,
         min_child_weight=2,
         subsample=0.8,
         colsample_bytree=0.8,
-        gamma=0.5,                  # Less aggressive pruning
-        reg_alpha=0.3,              # Lighter regularization for adaptation
+        gamma=0.5,
+        reg_alpha=0.3,
         reg_lambda=0.8,
         random_state=42,
         eval_metric='logloss',
@@ -240,7 +237,6 @@ def train_model_incremental():
 
     model.fit(X, y, verbose=0)
 
-    # Save model
     joblib.dump(model, MODEL_PATH)
     joblib.dump(X.columns.tolist(), "models/feature_names.pkl")
     
@@ -249,13 +245,11 @@ def train_model_incremental():
     loss_count = (y == 0).sum()
     win_rate = (y == 1).sum() / len(y)
     
-    # ===== FEATURE IMPORTANCE LOGGING =====
     feature_importance = pd.DataFrame({
         'feature': X.columns,
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
 
-    # Log top features
     logger.info(f"\n✅ MODEL UPDATED!")
     logger.info(f"   Trades Learned: {len(data)} (W: {win_count}, L: {loss_count})")
     logger.info(f"   Accuracy: {accuracy:.1%}")
@@ -265,7 +259,6 @@ def train_model_incremental():
     for idx, row in feature_importance.head(10).iterrows():
         logger.info(f"      {row['feature']}: {row['importance']:.3f}")
 
-    # ===== TRADE EXIT ANALYSIS =====
     logger.info(f"\n   📈 Latest Trade Analysis:")
     if len(history) > 0:
         last_trade = history[-1]
@@ -298,7 +291,6 @@ def get_xgboost_probability(trade_features):
         
         prob = model.predict_proba(X)[0][1] * 100
         
-        # Log reasoning
         confidence = trade_features.get('confidence', 50)
         confluence = trade_features.get('confluence_count', 0)
         adversity = trade_features.get('adversity_ratio', 0)
