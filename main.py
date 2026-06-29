@@ -3,7 +3,7 @@ import schedule
 import time
 import logging
 from datetime import datetime
-from scanner import get_top_symbols, get_ohlcv
+from scanner import get_live_symbols as get_top_symbols, get_ohlcv
 from strategy import get_signal
 from paper_trader import calculate_qty
 from exchange import get_exchange
