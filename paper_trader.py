@@ -98,11 +98,26 @@ def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str
     exit_fee = calculate_exit_fee(exit_price, qty)
     pnl_after_fees = pnl - exit_fee
 
+    # Update account balance
     update_balance(pnl_after_fees)
-    close_trade(trade["symbol"], exit_price, "WIN" if exit_reason == "Take Profit Hit" else "LOSS")
+
+    # Close trade and get the stored trade back
+    closed_trade = close_trade(
+        trade["symbol"],
+        exit_price,
+        "WIN" if exit_reason == "Take Profit Hit" else "LOSS"
+    )
+
+    # Store ML information for training
+    if closed_trade:
+        closed_trade["pnl"] = round(pnl_after_fees, 2)
+        closed_trade["entry_fee"] = trade.get("entry_fee", 0)
+        closed_trade["exit_fee"] = exit_fee
 
     logger.info(
         f"✅ CLOSED {trade['symbol']} | {exit_reason} | "
-        f"Raw PnL: ${pnl:.2f} | Exit Fee: ${exit_fee:.2f} | Net PnL: ${pnl_after_fees:.2f}"
+        f"Raw PnL: ${pnl:.2f} | Exit Fee: ${exit_fee:.2f} | "
+        f"Net PnL: ${pnl_after_fees:.2f}"
     )
+
     return pnl_after_fees
