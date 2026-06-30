@@ -1,11 +1,25 @@
 import logging
 import asyncio
-from trade_manager import get_open_trades, save_open_trades, get_current_price, get_balance
+from trade_manager import get_open_trades, save_open_trades, get_balance
+from exchange import get_exchange
 from paper_trader import close_paper_trade_with_fees
 from telegram_alerts import send_alert
 from xgboost_trainer import train_model_incremental
 
 logger = logging.getLogger(__name__)
+exchange = get_exchange()
+
+
+async def get_current_price(symbol):
+    """Get current price from exchange"""
+    try:
+        if not exchange:
+            return None
+        ticker = exchange.fetch_ticker(symbol)
+        return ticker.get('last', None)
+    except Exception as e:
+        logger.debug(f"Failed to get price for {symbol}: {e}")
+        return None
 
 
 async def monitor_trades():
@@ -26,7 +40,7 @@ async def monitor_trades():
                     updated_trades.append(trade)
                     continue
 
-                current_price = get_current_price(symbol)
+                current_price = await get_current_price(symbol)
 
                 if current_price is None:
                     logger.debug(f"No price data for {symbol}, keeping trade open")
