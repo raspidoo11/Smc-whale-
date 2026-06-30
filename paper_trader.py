@@ -77,16 +77,37 @@ def open_paper_trade(signal: dict):
 
 def close_paper_trade(trade_id: int, exit_price: float, exit_reason: str):
     """
-    Close a paper trade and apply realistic fees
+    Close a paper trade, calculate PnL, apply fees, and update balance.
+    Call this from trade_monitor.py when SL or TP is hit.
     """
-    # This function should be called from your monitor when SL or TP is hit
-    # You would normally fetch the trade, calculate PnL, apply fees, then update balance
-    
-    # Example structure (implement according to your trade storage):
-    # trade = get_trade_by_id(trade_id)
-    # pnl = calculate_pnl(trade, exit_price)
-    # pnl_after_fees = apply_fees(pnl, trade["entry"], trade["qty"])
-    # update_balance(pnl_after_fees)
-    # update_trade(trade_id, status="CLOSED", exit_price=exit_price, pnl=pnl_after_fees, exit_reason=exit_reason)
-    
-    pass
+    trade = get_trade_by_id(trade_id)
+    if not trade:
+        logger.error(f"Trade #{trade_id} not found")
+        return None
+
+    entry = float(trade["entry"])
+    qty = float(trade["qty"])
+    direction = trade["direction"]
+
+    # Calculate raw PnL
+    if direction == "LONG":
+        pnl = (exit_price - entry) * qty
+    else:
+        pnl = (entry - exit_price) * qty
+
+    # Apply realistic fees
+    pnl_after_fees = apply_fees(pnl, entry, qty)
+
+    # Update account balance
+    update_balance(pnl_after_fees)
+
+    # Update trade record
+    update_trade(trade_id, {
+        "status": "CLOSED",
+        "exit_price": exit_price,
+        "pnl": round(pnl_after_fees, 2),
+        "exit_reason": exit_reason
+    })
+
+    logger.info(f"Closed #{trade_id} | {exit_reason} | PnL: ${pnl_after_fees:.2f} (after fees)")
+    return pnl_after_fees
