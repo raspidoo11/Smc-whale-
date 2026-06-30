@@ -81,10 +81,10 @@ def add_trade(trade):
 def close_trade(symbol, exit_price, result):
     trades = get_open_trades()
     history = get_trade_history()
-    
+
     remaining = []
     closed_trade = None
-    
+
     for trade in trades:
         if (
             trade.get("symbol") == symbol
@@ -92,16 +92,18 @@ def close_trade(symbol, exit_price, result):
             and closed_trade is None
         ):
             trade["status"] = result
-            trade["exit_price"] = exit_price
+            trade["exit_price"] = float(exit_price)
             closed_trade = trade
         else:
             remaining.append(trade)
-    
+
     if closed_trade:
         history.append(closed_trade)
         save_trade_history(history)
-    
+        logger.info(f"Trade closed: {symbol} ({result})")
+
     save_open_trades(remaining)
+
     return closed_trade
 
 def update_balance(pnl):
