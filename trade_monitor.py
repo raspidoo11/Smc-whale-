@@ -1,74 +1,107 @@
 import logging
-from trade_manager import get_open_trades, save_open_trades, get_current_price, close_trade, update_balance, get_balance
-from paper_trader import apply_fees
+import asyncio
+from trade_manager import get_open_trades, save_open_trades, get_current_price, get_balance
+from paper_trader import close_paper_trade_with_fees
 from telegram_alerts import send_alert
+from xgboost_trainer import train_model_incremental
 
 logger = logging.getLogger(__name__)
 
 
-def monitor_trades():
-    open_trades = get_open_trades()
-    if not open_trades:
-        return
+async def monitor_trades():
+    """Monitor open trades and close on SL/TP hits"""
+    try:
+        open_trades = get_open_trades()
+        if not open_trades:
+            return
 
-    updated_trades = []
-    modified = False
+        updated_trades = []
+        modified = False
 
-    for trade in open_trades:
-        symbol = trade["symbol"]
-        current_price = get_current_price(symbol)
+        for trade in open_trades:
+            try:
+                symbol = trade.get("symbol")
+                if not symbol:
+                    logger.warning("❌ Trade missing symbol, skipping...")
+                    updated_trades.append(trade)
+                    continue
 
-        if current_price is None:
-            updated_trades.append(trade)
-            continue
+                current_price = get_current_price(symbol)
 
-        entry = float(trade["entry"])
-        sl = float(trade["sl"])
-        tp = float(trade["tp"])
-        direction = trade["direction"]
-        qty = float(trade["qty"])
+                if current_price is None:
+                    logger.debug(f"No price data for {symbol}, keeping trade open")
+                    updated_trades.append(trade)
+                    continue
 
-        hit_tp = False
-        hit_sl = False
+                entry = float(trade.get("entry", 0))
+                sl = float(trade.get("sl", 0))
+                tp = float(trade.get("tp", 0))
+                direction = trade.get("direction")
+                qty = float(trade.get("qty", 0))
 
-        if direction == "LONG":
-            hit_tp = current_price >= tp
-            hit_sl = current_price <= sl
-        else:  # SHORT
-            hit_tp = current_price <= tp
-            hit_sl = current_price >= sl
+                if not all([entry, sl, tp, direction, qty]):
+                    logger.warning(f"❌ Trade has invalid data: {trade}")
+                    updated_trades.append(trade)
+                    continue
 
-        if hit_tp or hit_sl:
-            exit_price = tp if hit_tp else sl
-            exit_reason = "Take Profit Hit" if hit_tp else "Stop Loss Hit"
+                hit_tp = False
+                hit_sl = False
 
-            # Calculate raw PnL
-            if direction == "LONG":
-                pnl = (exit_price - entry) * qty
-            else:
-                pnl = (entry - exit_price) * qty
+                # Check if TP or SL hit
+                if direction == "LONG":
+                    hit_tp = current_price >= tp
+                    hit_sl = current_price <= sl
+                elif direction == "SHORT":
+                    hit_tp = current_price <= tp
+                    hit_sl = current_price >= sl
+                else:
+                    logger.warning(f"❌ Invalid direction: {direction}")
+                    updated_trades.append(trade)
+                    continue
 
-            # Apply realistic fees
-            pnl_after_fees = apply_fees(pnl, entry, qty)
+                if hit_tp or hit_sl:
+                    exit_price = tp if hit_tp else sl
+                    exit_reason = "Take Profit Hit" if hit_tp else "Stop Loss Hit"
 
-            # Update balance
-            update_balance(pnl_after_fees)
+                    logger.info(f"🚨 {exit_reason} on {symbol} at ${exit_price:.6f}")
 
-            # Close trade using existing function
-            close_trade(symbol, exit_price, "WIN" if hit_tp else "LOSS")
+                    # Use paper_trader to close with proper fee handling
+                    pnl_after_fees = close_paper_trade_with_fees(trade, exit_price, exit_reason)
 
-            # Send alert with fee-applied PnL
-            send_alert(
-                f"{'✅' if hit_tp else '❌'} {exit_reason}\n"
-                f"{direction} {symbol}\n"
-                f"Entry → Exit: ${entry:.4f} → ${exit_price:.4f}\n"
-                f"PnL: ${pnl_after_fees:.2f} (after fees)\n"
-                f"New Balance: ${get_balance():.2f}"
-            )
+                    # Send alert
+                    status_emoji = "✅" if hit_tp else "❌"
+                    await send_alert(
+                        f"{status_emoji} {exit_reason}\n"
+                        f"{direction} {symbol}\n"
+                        f"Entry: ${entry:.6f} → Exit: ${exit_price:.6f}\n"
+                        f"Qty: {qty}\n"
+                        f"Net PnL: ${pnl_after_fees:.2f}\n"
+                        f"Balance: ${get_balance():.2f}"
+                    )
 
-            modified = True
-        else:
-            updated_trades.append(trade)
+                    # Retrain model after trade closes
+                    train_model_incremental()
 
-    if modified:
-        save_open_trades(updated_trades)
+                    modified = True
+                else:
+                    updated_trades.append(trade)
+
+            except Exception as e:
+                logger.exception(f"❌ Error monitoring trade {trade.get('symbol')}: {e}")
+                updated_trades.append(trade)
+
+        if modified:
+            save_open_trades(updated_trades)
+            logger.info(f"Updated {len(open_trades) - len(updated_trades)} closed trades")
+
+    except Exception as e:
+        logger.exception(f"❌ Monitor trades failed: {e}")
+
+
+async def main():
+    """Main monitoring loop"""
+    await monitor_trades()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
