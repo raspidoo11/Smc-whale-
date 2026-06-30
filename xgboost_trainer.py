@@ -175,6 +175,7 @@ def train_model_incremental():
 
     win_count = int((y == 1).sum())
     loss_count = int((y == 0).sum())
+    win_rate = win_count / max(len(y), 1)
 
     model = XGBClassifier(
         n_estimators=100,
@@ -197,7 +198,29 @@ def train_model_incremental():
     joblib.dump(model, MODEL_PATH)
     joblib.dump(X.columns.tolist(), FEATURE_PATH)
 
-    logger.info(f"Model trained on {len(rows)} trades")
+    # === Full logging as requested ===
+    logger.info(f"\n✅ MODEL UPDATED!")
+    logger.info(f"   Trades Learned: {len(rows)} (W: {win_count}, L: {loss_count})")
+    logger.info(f"   Win Rate: {win_rate:.1%}")
+
+    # Top 10 Features
+    feature_importance = pd.DataFrame({
+        'feature': X.columns,
+        'importance': model.feature_importances_
+    }).sort_values('importance', ascending=False)
+
+    logger.info(f"\n   📊 Top 10 Features (What Model Learned):")
+    for idx, row in feature_importance.head(10).iterrows():
+        logger.info(f"      {row['feature']}: {row['importance']:.3f}")
+
+    # Latest Trade Analysis
+    if len(history) > 0:
+        last_trade = history[-1]
+        logger.info(f"\n   📈 Latest Trade Analysis:")
+        logger.info(f"      Trade #{last_trade.get('trade_no', '?')}: {last_trade.get('symbol', '?')}")
+        logger.info(f"      Direction: {last_trade.get('direction', '?')}")
+        logger.info(f"      Entry → Exit: ${last_trade.get('entry', 0):.6f} → ${last_trade.get('exit_price', 0):.6f}")
+        logger.info(f"      Result: {last_trade.get('status', '?')} ({last_trade.get('pnl', 0):+.2f}%)")
 
     return model
 
