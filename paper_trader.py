@@ -1,5 +1,5 @@
 import logging
-from trade_manager import get_balance, update_balance, add_trade, update_trade
+from trade_manager import get_balance, update_balance, add_trade, close_trade
 
 logger = logging.getLogger(__name__)
 
