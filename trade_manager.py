@@ -78,7 +78,7 @@ def close_trade(symbol, exit_price, result):
     if closed_trade:
         history.append(closed_trade)
         save_trade_history(history)
-        logger.info(f"Trade closed: {symbol} ({result)}")
+        logger.info(f"Trade closed: {symbol} ({result})")   # ← Fixed here
 
         if result == "SL":
             set_cooldown(symbol, minutes=60)
