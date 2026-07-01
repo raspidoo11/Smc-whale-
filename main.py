@@ -108,17 +108,41 @@ async def scan():
                 "trade_no": trade_no
             }
             
-            logger.info(f"🚀 Sending order to Bybit: {trade['symbol']}")
+                        logger.info(f"🚀 Sending order to Bybit: {trade['symbol']}")
 
-order = await execute_trade(trade_data)
+            order = await execute_trade(trade_data)
 
-if not order:
-    logger.error(f"❌ Failed to execute order for {trade['symbol']}")
-    continue
+            if not order:
+                logger.error(f"❌ Failed to execute order for {trade['symbol']}")
+                continue
 
-logger.info(f"✅ Order placed successfully: {order}")
+            logger.info(f"✅ Order placed successfully: {order}")
 
-add_trade(trade_data)
+            add_trade(trade_data)
+
+            await send_alert(
+                f"""
+🟢 <b>#{trade_no}</b>
+
+<b>{trade['symbol']}</b>
+
+📈 Direction: <b>{trade['direction']}</b>
+
+📍 Entry: <b>${trade['entry']:.6f}</b>
+
+🛑 Stop Loss: <b>${trade['sl']:.6f}</b>
+
+🎯 Take Profit: <b>${trade['tp']:.6f}</b>
+
+📦 Quantity: <b>{trade['qty']:.4f}</b>
+
+⚡ Leverage: <b>10x</b>
+
+🔥 Confidence: <b>{trade.get('confidence', 0)}/100</b>
+
+💰 Balance: <b>${balance:.2f}</b>
+"""
+            )
 
             
 await send_alert(
