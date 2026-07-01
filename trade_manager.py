@@ -27,7 +27,7 @@ def save_json(file_path, data):
     with open(file_path, "w") as f:
         json.dump(data, f, indent=4)
 
-# ==================== EXISTING FUNCTIONS (kept) ====================
+# ==================== CORE FUNCTIONS ====================
 
 def get_balance():
     default = {"balance": 100.0, "daily_pnl": 0.0}
@@ -78,7 +78,7 @@ def close_trade(symbol, exit_price, result):
     if closed_trade:
         history.append(closed_trade)
         save_trade_history(history)
-        logger.info(f"Trade closed: {symbol} ({result})")
+        logger.info(f"Trade closed: {symbol} ({result)}")
 
         if result == "SL":
             set_cooldown(symbol, minutes=60)
@@ -104,25 +104,32 @@ def reset_daily_pnl():
     save_balance(data)
     logger.info("🔄 Daily PnL reset")
 
-# ==================== NEW: DYNAMIC RISK MANAGEMENT ====================
+# ==================== RISK MANAGEMENT ====================
+
+def risk_amount():
+    """Legacy function - kept for backward compatibility"""
+    return get_balance().get("balance", 100.0) * 0.01
 
 def get_risk_amount(leverage: int = 10) -> float:
     """
-    Calculate risk amount per trade.
-    Default: 0.5% of account balance with 10x leverage.
+    Dynamic risk amount.
+    Default: 0.5% of account balance (configurable via RISK_PERCENT env var)
     """
-    balance_data = get_balance()
-    balance = balance_data.get("balance", 100.0)
-    
-    risk_percent = float(os.getenv("RISK_PERCENT", "0.5")) / 100   # 0.5% default
-    
-    risk_amount = balance * risk_percent
-    return round(risk_amount, 2)
-
+    balance = get_balance().get("balance", 100.0)
+    risk_percent = float(os.getenv("RISK_PERCENT", "0.5")) / 100
+    return round(balance * risk_percent, 2)
 
 def get_risk_percent() -> float:
-    """Returns current risk percent (for logging)"""
     return float(os.getenv("RISK_PERCENT", "0.5"))
+
+# ==================== TRADE EXISTENCE CHECK ====================
+
+def trade_exists(symbol):
+    trades = get_open_trades()
+    return any(
+        t.get("symbol") == symbol and t.get("status") == "OPEN"
+        for t in trades
+    )
 
 # ==================== SIGNAL HASH SYSTEM ====================
 
