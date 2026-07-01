@@ -3,7 +3,6 @@ import numpy as np
 import logging
 import joblib
 import os
-
 from pathlib import Path
 from datetime import datetime
 from xgboost import XGBClassifier
@@ -17,7 +16,30 @@ FEATURE_PATH = "/app/data/models/feature_names.pkl"
 os.makedirs("/app/data/models", exist_ok=True)
 
 
-def extract_pro_features_from_trade(trade, historical_context=None):
+def calculate_atr_percentile(atr_series, current_atr, window=50):
+    if len(atr_series) < window:
+        return 50.0
+    recent_atr = atr_series.tail(window)
+    percentile = (recent_atr < current_atr).mean() * 100
+    return round(percentile, 1)
+
+
+def detect_market_regime(df, window=30):
+    if len(df) < window:
+        return "ranging"
+    atr = df["atr"].iloc[-1]
+    atr_avg = df["atr"].tail(window).mean()
+    price_change = abs(df["close"].iloc[-1] - df["close"].iloc[-window]) / df["close"].iloc[-window]
+
+    if atr > atr_avg * 1.4:
+        return "volatile"
+    elif price_change > 0.04:
+        return "trending"
+    else:
+        return "ranging"
+
+
+def extract_pro_features_from_trade(trade, historical_context=None, regime="ranging"):
     features = {
         "volume_spike": trade.get("volume_spike", 0),
         "displacement": trade.get("displacement", 0),
@@ -50,6 +72,22 @@ def extract_pro_features_from_trade(trade, historical_context=None):
     features["body_ratio"] = body / max(atr, 0.0001)
     features["volume_strength"] = volume / max(volume_ma, 0.0001)
     features["atr_expansion"] = atr
+
+    atr_percentile = trade.get("atr_percentile", 50.0)
+    features["atr_percentile"] = atr_percentile
+    features["is_high_volatility"] = 1 if atr_percentile > 70 else 0
+    features["is_low_volatility"] = 1 if atr_percentile < 30 else 0
+
+    features["regime_trending"] = 1 if regime == "trending" else 0
+    features["regime_ranging"] = 1 if regime == "ranging" else 0
+    features["regime_volatile"] = 1 if regime == "volatile" else 0
+
+    # === Phase 8: Market Structure Features ===
+    features["distance_to_prev_high"] = trade.get("distance_to_prev_high", 0)
+    features["distance_to_prev_low"] = trade.get("distance_to_prev_low", 0)
+    features["distance_to_ema20"] = trade.get("distance_to_ema20", 0)
+    features["distance_to_ema50"] = trade.get("distance_to_ema50", 0)
+    features["distance_to_vwap"] = trade.get("distance_to_vwap", 0)
 
     confluence_score = (
         int(trade.get("volume_spike", 0))
@@ -97,11 +135,13 @@ def extract_pro_features_from_trade(trade, historical_context=None):
         features["cumulative_pnl"] = 0
         features["current_dd_pct"] = 0
 
-    features["volume_x_displacement"] = (
-        trade.get("volume_spike", 0) * trade.get("displacement", 0)
-    )
+    # Phase 8: More Feature Interactions
+    features["volume_x_displacement"] = trade.get("volume_spike", 0) * trade.get("displacement", 0)
     features["sweep_x_fvg"] = trade.get("sweep", 0) * trade.get("fvg", 0)
     features["volatility_x_risk"] = atr * features["risk_pct"]
+    features["atr_x_confluence"] = atr * (confluence_score / 4.0)
+    features["atr_x_session"] = atr * (1 if 7 <= hour <= 16 else 0)
+    features["fvg_x_sweep"] = trade.get("fvg", 0) * trade.get("sweep", 0)
 
     return features
 
@@ -154,12 +194,11 @@ def train_model_incremental():
     context = calculate_historical_context(history[:-1])
 
     rows = []
-
     for trade in history:
         if trade.get("status") not in ["WIN", "LOSS"]:
             continue
-
-        row = extract_pro_features_from_trade(trade, context)
+        regime = trade.get("market_regime", "ranging")
+        row = extract_pro_features_from_trade(trade, context, regime=regime)
         row["target"] = 1 if trade["status"] == "WIN" else 0
         rows.append(row)
 
@@ -167,10 +206,8 @@ def train_model_incremental():
         return None
 
     df = pd.DataFrame(rows)
-
     X = df.drop(columns=["target"])
     X = X.select_dtypes(include=[np.number]).fillna(0)
-
     y = df["target"]
 
     win_count = int((y == 1).sum())
@@ -178,15 +215,15 @@ def train_model_incremental():
     win_rate = win_count / max(len(y), 1)
 
     model = XGBClassifier(
-        n_estimators=100,
-        learning_rate=0.1,
-        max_depth=5,
-        min_child_weight=2,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        gamma=0.5,
-        reg_alpha=0.3,
-        reg_lambda=0.8,
+        n_estimators=140,
+        learning_rate=0.065,
+        max_depth=6,
+        min_child_weight=4,
+        subsample=0.82,
+        colsample_bytree=0.82,
+        gamma=0.65,
+        reg_alpha=0.55,
+        reg_lambda=1.1,
         scale_pos_weight=max(loss_count / max(win_count, 1), 1),
         random_state=42,
         eval_metric="logloss",
@@ -198,22 +235,28 @@ def train_model_incremental():
     joblib.dump(model, MODEL_PATH)
     joblib.dump(X.columns.tolist(), FEATURE_PATH)
 
-    # === Full logging as requested ===
-    logger.info(f"\n✅ MODEL UPDATED!")
+    train_accuracy = model.score(X, y)
+
+    logger.info(f"\n✅ MODEL UPDATED (Phase 8)!")
     logger.info(f"   Trades Learned: {len(rows)} (W: {win_count}, L: {loss_count})")
     logger.info(f"   Win Rate: {win_rate:.1%}")
+    logger.info(f"   Train Accuracy: {train_accuracy:.3f}")
 
-    # Top 10 Features
     feature_importance = pd.DataFrame({
         'feature': X.columns,
         'importance': model.feature_importances_
     }).sort_values('importance', ascending=False)
 
-    logger.info(f"\n   📊 Top 10 Features (What Model Learned):")
+    logger.info(f"\n   📊 Top 10 Features:")
     for idx, row in feature_importance.head(10).iterrows():
         logger.info(f"      {row['feature']}: {row['importance']:.3f}")
 
-    # Latest Trade Analysis
+    # Phase 8: Enhanced Self-Diagnosis
+    logger.info(f"\n   🩺 Self-Diagnosis Report:")
+    logger.info(f"      Total Features Used: {len(X.columns)}")
+    logger.info(f"      Top 3 Features: {', '.join(feature_importance.head(3)['feature'].tolist())}")
+    logger.info(f"      Model Stability (Train Acc): {train_accuracy:.1%}")
+
     if len(history) > 0:
         last_trade = history[-1]
         logger.info(f"\n   📈 Latest Trade Analysis:")
@@ -225,7 +268,7 @@ def train_model_incremental():
     return model
 
 
-def get_xgboost_probability(trade_features):
+def get_xgboost_probability(trade_features, recent_win_rate=0.5):
     try:
         if not Path(MODEL_PATH).exists():
             return 50.0
@@ -234,7 +277,6 @@ def get_xgboost_probability(trade_features):
         feature_names = joblib.load(FEATURE_PATH)
 
         X = pd.DataFrame([trade_features])
-
         for col in feature_names:
             if col not in X.columns:
                 X[col] = 0
@@ -242,11 +284,63 @@ def get_xgboost_probability(trade_features):
         X = X[feature_names]
         X = X.select_dtypes(include=[np.number]).fillna(0)
 
-        prob = model.predict_proba(X)[0][1] * 100
-        prob = max(5, min(95, prob))
+        raw_prob = model.predict_proba(X)[0][1] * 100
 
-        return round(prob, 1)
+        performance_adjustment = (recent_win_rate - 0.5) * 8
+        calibrated_prob = raw_prob + performance_adjustment
+        calibrated_prob = max(5, min(95, calibrated_prob))
+
+        return round(calibrated_prob, 1)
 
     except Exception as e:
         logger.error(f"Prediction failed: {e}")
         return 50.0
+
+
+def get_dynamic_confidence_threshold(regime="ranging", atr_percentile=50, recent_win_rate=0.5):
+    base_threshold = 45
+
+    if regime == "trending":
+        base_threshold -= 5
+    elif regime == "volatile":
+        base_threshold += 8
+    elif regime == "ranging":
+        base_threshold += 5
+
+    if recent_win_rate > 0.55:
+        base_threshold -= 5
+    elif recent_win_rate < 0.40:
+        base_threshold += 10
+
+    if atr_percentile > 80:
+        base_threshold += 5
+    elif atr_percentile < 20:
+        base_threshold -= 3
+
+    final_threshold = max(25, min(70, base_threshold))
+    return final_threshold
+
+
+def get_ai_risk_percent(ai_prob, recent_drawdown=0.0, regime="ranging"):
+    base_risk = 0.5
+
+    if ai_prob >= 75:
+        risk = base_risk * 1.8
+    elif ai_prob >= 65:
+        risk = base_risk * 1.4
+    elif ai_prob >= 55:
+        risk = base_risk * 1.1
+    else:
+        risk = base_risk * 0.7
+
+    if recent_drawdown > 5:
+        risk *= 0.7
+    elif recent_drawdown > 10:
+        risk *= 0.5
+
+    if regime == "volatile":
+        risk *= 0.8
+    elif regime == "trending":
+        risk *= 1.1
+
+    return round(max(0.2, min(2.0, risk)), 2)
