@@ -1,27 +1,18 @@
-import os
 import logging
 from exchange import get_trade_client
 
 logger = logging.getLogger(__name__)
 
-client = get_trade_client()
-
-EXECUTE = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
-
 
 async def execute_trade(signal):
-    logger.info(f"EXECUTE_TRADES={EXECUTE}")
-    logger.info(f"Received signal: {signal}")
-
-    if not EXECUTE:
-        logger.warning("Trade execution disabled (paper mode).")
-        return {"paper": True}
-
     try:
+        client = get_trade_client()
+
         symbol = signal["symbol"].replace("/", "").upper()
         direction = signal["direction"]
         qty = str(signal["qty"])
         sl = signal.get("sl")
+        tp = signal.get("tp")
 
         side = "Buy" if direction == "LONG" else "Sell"
 
@@ -33,76 +24,20 @@ async def execute_trade(signal):
             "qty": qty,
         }
 
-        if sl is not None:
+        if sl:
             params["stopLoss"] = str(sl)
 
-        logger.info(f"Sending order to Bybit: {params}")
+        if tp:
+            params["takeProfit"] = str(tp)
+
+        logger.info(f"📤 Sending order: {params}")
 
         result = client.place_order(**params)
 
-        logger.info(f"Bybit response: {result}")
-        logger.info(f"✅ EXECUTED {direction} {symbol} Qty={qty}")
+        logger.info(f"📥 Bybit response: {result}")
 
         return result
 
     except Exception as e:
-        logger.exception(f"❌ Trade failed: {e}")
-        return None
-
-
-async def close_position(symbol, direction, qty):
-    if not EXECUTE:
-        logger.info("Paper mode - close skipped.")
-        return True
-
-    try:
-        symbol = symbol.replace("/", "").upper()
-        side = "Sell" if direction == "LONG" else "Buy"
-
-        params = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": side,
-            "orderType": "Market",
-            "qty": str(qty),
-            "reduceOnly": True,
-        }
-
-        logger.info(f"Closing position: {params}")
-
-        result = client.place_order(**params)
-
-        logger.info(f"Close response: {result}")
-
-        return result
-
-    except Exception as e:
-        logger.exception(f"❌ Close failed: {e}")
-        return None
-
-
-async def activate_trailing_stop(symbol, direction, qty, trail=0.5):
-    if not EXECUTE:
-        logger.info("Paper mode - trailing stop skipped.")
-        return None
-
-    try:
-        symbol = symbol.replace("/", "").upper()
-
-        params = {
-            "category": "linear",
-            "symbol": symbol,
-            "trailingStop": str(trail),
-        }
-
-        logger.info(f"Setting trailing stop: {params}")
-
-        result = client.set_trading_stop(**params)
-
-        logger.info(f"Trailing stop response: {result}")
-
-        return result
-
-    except Exception as e:
-        logger.exception(f"❌ Trailing stop failed: {e}")
+        logger.exception(f"❌ Trade execution failed: {e}")
         return None
