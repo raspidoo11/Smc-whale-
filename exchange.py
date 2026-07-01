@@ -49,6 +49,20 @@ def get_trade_client():
         api_key=api_key,
         api_secret=api_secret,
     )
+    try:
+    response = client.get_wallet_balance(accountType="UNIFIED")
+
+    if response.get("retCode") == 0:
+        logger.info("✅ Successfully connected to Bybit API")
+        logger.info(f"Environment: {'TESTNET' if mode == 'testnet' else 'MAINNET'}")
+    else:
+        logger.error(
+            f"❌ Bybit authentication failed: {response.get('retMsg')}"
+        )
+
+except Exception as e:
+    logger.exception(f"❌ Could not connect to Bybit: {e}")
+    raise
 
     logger.info(f"Trading client initialized ({mode})")
 
