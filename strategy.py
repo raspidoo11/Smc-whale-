@@ -49,7 +49,6 @@ def get_signal(df_15m, df_5m):
             latest["low"] < df_5m["low"].iloc[-10:-1].min()
             and latest["close"] > latest["open"]
         )
-
         bear_sweep = (
             latest["high"] > df_5m["high"].iloc[-10:-1].max()
             and latest["close"] < latest["open"]
@@ -59,33 +58,61 @@ def get_signal(df_15m, df_5m):
         bear_fvg = df_5m["high"].iloc[-1] < df_5m["low"].iloc[-3]
 
         score = 0
-
         if latest["volume_spike"] == 1:
             score += 25
-
         if latest["displacement"] == 1:
             score += 25
-
         if trend_bull:
             score += 20
-
         if trend_bear:
             score += 20
-
         if bull_sweep or bear_sweep:
             score += 20
-
         if bull_fvg or bear_fvg:
             score += 15
 
         entry = float(latest["close"])
+
+        # === DYNAMIC SL & TP BASED ON VOLATILITY ===
+        atr_series = df_5m["atr"].dropna()
+        atr_avg = atr_series.tail(30).mean() if len(atr_series) >= 10 else atr
+
+        # Volatility regime
+        if atr > atr_avg * 1.3:
+            # High volatility = Good conditions → Higher RR + slightly wider SL
+            sl_multiplier = 1.0
+            rr_multiplier = 2.8
+        elif atr < atr_avg * 0.7:
+            # Low volatility = Bad/choppy conditions → Tighter SL + lower RR
+            sl_multiplier = 0.65
+            rr_multiplier = 1.6
+        else:
+            # Normal conditions
+            sl_multiplier = 0.85
+            rr_multiplier = 2.0
+
+        if trend_bull:
+            swing_low = df_5m["low"].iloc[-8:-1].min()
+            sl = min(swing_low * 0.9995, entry - atr * sl_multiplier)
+            tp = entry + (entry - sl) * rr_multiplier
+
+        elif trend_bear:
+            swing_high = df_5m["high"].iloc[-8:-1].max()
+            sl = max(swing_high * 1.0005, entry + atr * sl_multiplier)
+            tp = entry - (sl - entry) * rr_multiplier
+        else:
+            return None
+
+        risk_pct = abs(entry - sl) / entry
+        reward_pct = abs(tp - entry) / entry
+        adversity_ratio = risk_pct / max(reward_pct, 0.0001)
+        risk_reward = abs(tp - entry) / max(abs(entry - sl), 0.0001)
 
         now = datetime.now()
         hour = now.hour
         day_of_week = now.weekday()
 
         history = get_trade_history()
-
         context = (
             calculate_historical_context(history)
             if len(history) >= 5
@@ -96,25 +123,6 @@ def get_signal(df_15m, df_5m):
                 "current_dd_pct": 0,
             }
         )
-
-        # Calculate SL/TP FIRST
-        if trend_bull:
-            swing_low = df_5m["low"].iloc[-8:-1].min()
-            sl = min(swing_low * 0.9995, entry - atr * 0.8)
-            tp = entry + (entry - sl) * 1.5
-
-        elif trend_bear:
-            swing_high = df_5m["high"].iloc[-8:-1].max()
-            sl = max(swing_high * 1.0005, entry + atr * 0.8)
-            tp = entry - (sl - entry) * 1.5
-
-        else:
-            return None
-
-        risk_pct = abs(entry - sl) / entry
-        reward_pct = abs(tp - entry) / entry
-        adversity_ratio = risk_pct / max(reward_pct, 0.0001)
-        risk_reward = abs(tp - entry) / max(abs(entry - sl), 0.0001)
 
         ai_prob = 50.0
 
@@ -169,7 +177,7 @@ def get_signal(df_15m, df_5m):
             f"Signal check | trend_bull={trend_bull} | "
             f"trend_bear={trend_bear} | "
             f"SMC_score={score} | AI={ai_prob:.1f} | "
-            f"Final={final_confidence}"
+            f"Final={final_confidence} | RR={risk_reward:.2f}"
         )
 
         if trend_bull and final_confidence >= 40:
