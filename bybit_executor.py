@@ -1,6 +1,7 @@
 import logging
 import time
 from exchange import get_trade_client
+from trade_manager import get_risk_amount
 
 logger = logging.getLogger(__name__)
 
@@ -19,10 +20,9 @@ def get_symbol_info(symbol):
         return None
 
 
-def calculate_proper_qty(symbol, entry_price, sl_price, risk_usd=5.0):
+def calculate_proper_qty(symbol, entry_price, sl_price):
     """
-    Calculate quantity with proper exchange precision and limits.
-    Risks approximately $risk_usd when SL is hit.
+    Calculate quantity using dynamic risk (0.5% of balance by default).
     """
     market = get_symbol_info(symbol)
     if not market:
@@ -34,17 +34,16 @@ def calculate_proper_qty(symbol, entry_price, sl_price, risk_usd=5.0):
         if risk_per_unit == 0:
             return None
 
-        raw_qty = risk_usd / risk_per_unit
+        # Get dynamic risk amount from trade_manager
+        risk_amount = get_risk_amount()
+
+        raw_qty = risk_amount / risk_per_unit
 
         # Apply exchange precision
-        qty = market["precision"]["amount"] and float(
-            market["precision"]["amount"]
-        ) or 0.001
+        step = market.get("precision", {}).get("amount", 0.001)
+        qty = round(raw_qty / step) * step
 
-        # Round to correct step
-        qty = round(raw_qty / qty) * qty
-
-        # Check min/max
+        # Check min/max limits
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0)
         max_qty = market.get("limits", {}).get("amount", {}).get("max", 999999)
 
@@ -65,16 +64,13 @@ def set_leverage_if_needed(symbol, desired_leverage=10):
     """Ensure correct leverage is set before trading"""
     client = get_trade_client()
     try:
-        # Check current leverage
         positions = client.fetch_positions([symbol])
-        current_lev = None
-        if positions:
-            current_lev = int(positions[0].get("leverage", 0))
+        current_lev = int(positions[0].get("leverage", 0)) if positions else 0
 
         if current_lev != desired_leverage:
             logger.info(f"Setting leverage to {desired_leverage}x for {symbol}")
             client.set_leverage(desired_leverage, symbol, params={"category": "linear"})
-            time.sleep(0.5)  # small delay after leverage change
+            time.sleep(0.5)
         return True
     except Exception as e:
         logger.error(f"Leverage setting failed for {symbol}: {e}")
@@ -82,7 +78,7 @@ def set_leverage_if_needed(symbol, desired_leverage=10):
 
 
 async def execute_trade(signal):
-    """Execute trade with proper quantity, leverage, and SL/TP"""
+    """Execute trade with dynamic risk, leverage, and SL/TP"""
     client = get_trade_client()
 
     try:
@@ -92,7 +88,7 @@ async def execute_trade(signal):
         sl = float(signal.get("sl", 0))
         tp = float(signal.get("tp", 0))
 
-        # 1. Calculate proper quantity
+        # 1. Calculate proper quantity using dynamic risk
         qty = calculate_proper_qty(symbol, entry, sl)
         if not qty:
             logger.error(f"❌ Invalid quantity calculated for {symbol}")
@@ -120,7 +116,7 @@ async def execute_trade(signal):
 
         logger.info(f"📤 Sending order: {params}")
 
-        # 3. Place order with retry for temporary errors
+        # 3. Place order with retry
         result = None
         for attempt in range(3):
             try:
@@ -134,10 +130,8 @@ async def execute_trade(signal):
 
         logger.info(f"📥 Bybit response: {result}")
 
-        # 4. Verify SL/TP were attached (basic check)
         if result and result.get("retCode") == 0:
             logger.info(f"✅ Order placed successfully for {symbol}")
-            # You can add position verification here later using fetch_positions
         else:
             logger.warning(f"⚠️ Order may not have attached SL/TP properly")
 
@@ -149,10 +143,7 @@ async def execute_trade(signal):
 
 
 async def activate_trailing_stop(symbol, direction, qty, trail_percent=0.5, active_price=None):
-    """
-    Activate Bybit native trailing stop.
-    Call this after TP is reached or manually.
-    """
+    """Activate Bybit native trailing stop"""
     client = get_trade_client()
     try:
         side = "Sell" if direction == "LONG" else "Buy"
