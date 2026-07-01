@@ -52,13 +52,6 @@ def get_trade_history():
 def save_trade_history(history):
     save_json(HISTORY_FILE, history)
 
-def risk_amount():
-    return get_balance().get("balance", 100.0) * 0.01
-
-def trade_exists(symbol):
-    trades = get_open_trades()
-    return any(t["symbol"] == symbol and t["status"] == "OPEN" for t in trades)
-
 def next_trade_number():
     return len(get_trade_history()) + len(get_open_trades()) + 1
 
@@ -87,7 +80,6 @@ def close_trade(symbol, exit_price, result):
         save_trade_history(history)
         logger.info(f"Trade closed: {symbol} ({result})")
 
-        # Set cooldown if it was a stop loss
         if result == "SL":
             set_cooldown(symbol, minutes=60)
 
@@ -112,7 +104,27 @@ def reset_daily_pnl():
     save_balance(data)
     logger.info("🔄 Daily PnL reset")
 
-# ==================== NEW: SIGNAL HASH SYSTEM ====================
+# ==================== NEW: DYNAMIC RISK MANAGEMENT ====================
+
+def get_risk_amount(leverage: int = 10) -> float:
+    """
+    Calculate risk amount per trade.
+    Default: 0.5% of account balance with 10x leverage.
+    """
+    balance_data = get_balance()
+    balance = balance_data.get("balance", 100.0)
+    
+    risk_percent = float(os.getenv("RISK_PERCENT", "0.5")) / 100   # 0.5% default
+    
+    risk_amount = balance * risk_percent
+    return round(risk_amount, 2)
+
+
+def get_risk_percent() -> float:
+    """Returns current risk percent (for logging)"""
+    return float(os.getenv("RISK_PERCENT", "0.5"))
+
+# ==================== SIGNAL HASH SYSTEM ====================
 
 def get_signal_hashes():
     return load_json(SIGNAL_HASH_FILE, [])
@@ -131,12 +143,11 @@ def save_signal_hash(signal_hash):
     hashes = get_signal_hashes()
     if signal_hash not in hashes:
         hashes.append(signal_hash)
-        # Keep only last 500 hashes to avoid file bloat
         if len(hashes) > 500:
             hashes = hashes[-500:]
         save_signal_hashes(hashes)
 
-# ==================== NEW: COOLDOWN SYSTEM ====================
+# ==================== COOLDOWN SYSTEM ====================
 
 def get_cooldowns():
     return load_json(COOLDOWN_FILE, {})
@@ -148,7 +159,6 @@ def is_symbol_in_cooldown(symbol):
     cooldowns = get_cooldowns()
     if symbol not in cooldowns:
         return False
-    
     cooldown_until = datetime.fromisoformat(cooldowns[symbol])
     return datetime.now(timezone.utc) < cooldown_until
 
