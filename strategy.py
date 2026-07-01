@@ -163,7 +163,7 @@ def get_signal(df_15m, df_5m):
 
             ai_prob = get_xgboost_probability(trade_features)
 
-        final_confidence = int((score * 0.6) + (ai_prob * 0.4))
+        final_confidence = int((score * 0.4) + (ai_prob * 0.6))
 
         logger.info(
             f"Signal check | trend_bull={trend_bull} | "
