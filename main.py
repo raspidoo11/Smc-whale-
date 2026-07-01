@@ -108,7 +108,7 @@ async def scan():
                 "trade_no": trade_no
             }
 
-            logger.info(f"🚀 Sending order to Bybit: {trade['symbol']}")
+               logger.info(f"🚀 Sending order to Bybit: {trade['symbol']}")
 
             order = await execute_trade(trade_data)
 
