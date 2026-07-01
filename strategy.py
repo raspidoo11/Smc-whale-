@@ -2,6 +2,10 @@ import pandas as pd
 import logging
 import os
 from datetime import datetime, timezone
+from news_filter import is_high_impact_news_time
+
+if is_high_impact_news_time(minutes_before=30, minutes_after=30):
+    return None   # Skip signal during high-impact news
 from trade_manager import get_trade_history
 from xgboost_trainer import (
     calculate_historical_context,
