@@ -6,3 +6,4 @@ schedule
 xgboost
 joblib
 scikit-learn
+pybit==5.7.0
