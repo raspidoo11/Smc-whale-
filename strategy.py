@@ -148,7 +148,7 @@ def get_signal(df_15m, df_5m):
             # ... (your existing feature dict)
             pass  # Keeping your existing XGBoost feature code
 
-        final_confidence = int((score * 0.4) + (ai_prob * 0.6))
+        final_confidence = int((score * 0.5) + (ai_prob * 0.5))
         final_confidence += session_bonus
         final_confidence = max(0, min(final_confidence, 100))
 
