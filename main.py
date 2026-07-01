@@ -122,7 +122,7 @@ async def scan():
 
             await send_alert(
                 f"""
-🟢 <b>#{trade_no}</b>
+ <b>#{trade_no}</b>
 
 <b>{trade['symbol']}</b>
 
