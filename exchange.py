@@ -48,53 +48,48 @@ def get_trade_client():
 
     mode = os.getenv("TRADE_MODE", "demo").lower()
 
-if mode == "demo":
-    logger.info("🎯 Connecting to Bybit Demo Trading...")
-    _trade_client = HTTP(
-        testnet=False,
-        demo=True,
-        api_key=api_key,
-        api_secret=api_secret,
-    )
+    if mode == "demo":
+        logger.info("🎯 Connecting to Bybit Demo Trading...")
+        _trade_client = HTTP(
+            testnet=False,
+            demo=True,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
 
-elif mode == "testnet":
-    logger.info("🧪 Connecting to Bybit Testnet...")
-    _trade_client = HTTP(
-        testnet=True,
-        demo=False,
-        api_key=api_key,
-        api_secret=api_secret,
-    )
+    elif mode == "testnet":
+        logger.info("🧪 Connecting to Bybit Testnet...")
+        _trade_client = HTTP(
+            testnet=True,
+            demo=False,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
 
-elif mode == "live":
-    logger.info("💰 Connecting to Bybit Live...")
-    _trade_client = HTTP(
-        testnet=False,
-        demo=False,
-        api_key=api_key,
-        api_secret=api_secret,
-    )
+    elif mode == "live":
+        logger.info("💰 Connecting to Bybit Live...")
+        _trade_client = HTTP(
+            testnet=False,
+            demo=False,
+            api_key=api_key,
+            api_secret=api_secret,
+        )
 
-else:
-    raise ValueError(f"Unknown TRADE_MODE: {mode}")
+    else:
+        raise ValueError(f"Unknown TRADE_MODE: {mode}")
 
-    # Verify authentication immediately
     try:
         response = _trade_client.get_wallet_balance(accountType="UNIFIED")
 
         if response.get("retCode") == 0:
             logger.info("✅ Successfully connected to Bybit API")
-            logger.info(
-                f"🌐 Environment: {'TESTNET' if mode == 'testnet' else 'MAINNET'}"
-            )
+            logger.info(f"🌐 Trading Mode: {mode.upper()}")
 
             wallets = response.get("result", {}).get("list", [])
             logger.info(f"💰 Wallets detected: {len(wallets)}")
 
         else:
-            logger.error(
-                f"❌ Bybit authentication failed: {response.get('retMsg')}"
-            )
+            logger.error(f"❌ Bybit authentication failed: {response.get('retMsg')}")
 
     except Exception as e:
         logger.exception(f"❌ Could not connect to Bybit: {e}")
