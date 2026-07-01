@@ -46,13 +46,37 @@ def get_trade_client():
     if not api_key or not api_secret:
         raise ValueError("Missing BYBIT_API_KEY or BYBIT_API_SECRET")
 
-    mode = os.getenv("TRADE_MODE", "testnet").lower()
+    mode = os.getenv("TRADE_MODE", "demo").lower()
 
+if mode == "demo":
+    logger.info("🎯 Connecting to Bybit Demo Trading...")
     _trade_client = HTTP(
-        testnet=(mode == "testnet"),
+        testnet=False,
+        demo=True,
         api_key=api_key,
         api_secret=api_secret,
     )
+
+elif mode == "testnet":
+    logger.info("🧪 Connecting to Bybit Testnet...")
+    _trade_client = HTTP(
+        testnet=True,
+        demo=False,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+
+elif mode == "live":
+    logger.info("💰 Connecting to Bybit Live...")
+    _trade_client = HTTP(
+        testnet=False,
+        demo=False,
+        api_key=api_key,
+        api_secret=api_secret,
+    )
+
+else:
+    raise ValueError(f"Unknown TRADE_MODE: {mode}")
 
     # Verify authentication immediately
     try:
