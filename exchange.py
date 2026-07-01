@@ -1,37 +1,55 @@
 import os
 import logging
+import ccxt
 from pybit.unified_trading import HTTP
 
 logger = logging.getLogger(__name__)
 
+_public_exchange = None
+_trade_client = None
+
 
 def get_exchange():
-    execute = os.getenv("EXECUTE_TRADES", "false").lower() == "true"
-    mode = os.getenv("TRADE_MODE", "testnet").lower()
+    """CCXT exchange for public market data."""
+    global _public_exchange
 
-    if not execute:
-        logger.info("Paper mode - no authentication")
-        return None
+    if _public_exchange is None:
+        _public_exchange = ccxt.bybit({
+            "enableRateLimit": True,
+            "timeout": 30000,
+            "options": {
+                "defaultType": "swap",
+                "defaultSettle": "USDT",
+            },
+        })
+
+        _public_exchange.load_markets()
+        logger.info(f"Loaded {_public_exchange.id} markets")
+
+    return _public_exchange
+
+
+def get_trade_client():
+    """Pybit client for authenticated trading."""
+    global _trade_client
+
+    if _trade_client is not None:
+        return _trade_client
 
     api_key = os.getenv("BYBIT_API_KEY")
     api_secret = os.getenv("BYBIT_API_SECRET")
 
     if not api_key or not api_secret:
-        raise ValueError("Missing BYBIT_API_KEY or BYBIT_API_SECRET")
+        raise ValueError("Missing Bybit API credentials.")
 
-    # ✔ BYBIT V5 SESSION
-    session = HTTP(
+    mode = os.getenv("TRADE_MODE", "testnet").lower()
+
+    _trade_client = HTTP(
         testnet=(mode == "testnet"),
         api_key=api_key,
         api_secret=api_secret,
     )
 
-    # quick validation call (fails fast if keys are wrong)
-    try:
-        info = session.get_wallet_balance(accountType="UNIFIED")
-        logger.info("Bybit auth successful ✔")
-    except Exception as e:
-        logger.error(f"Bybit auth failed ❌: {e}")
-        raise
+    logger.info(f"Trading client initialized ({mode})")
 
-    return session
+    return _trade_client
