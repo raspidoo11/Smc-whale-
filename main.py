@@ -6,6 +6,7 @@ from datetime import datetime
 from scanner import get_live_symbols as get_top_symbols, get_ohlcv
 from strategy import get_signal
 from paper_trader import calculate_qty
+from bybit_executor import execute_trade
 from exchange import get_exchange
 from telegram_alerts import send_alert
 from trade_manager import (
@@ -107,9 +108,20 @@ async def scan():
                 "trade_no": trade_no
             }
             
-            add_trade(trade_data)
+            logger.info(f"🚀 Sending order to Bybit: {trade['symbol']}")
+
+order = await execute_trade(trade_data)
+
+if not order:
+    logger.error(f"❌ Failed to execute order for {trade['symbol']}")
+    continue
+
+logger.info(f"✅ Order placed successfully: {order}")
+
+add_trade(trade_data)
+
             
-            await send_alert(
+await send_alert(
                 f"""
 🟢 <b>#{trade_no}</b>
 
@@ -149,7 +161,7 @@ async def run_monitor():
 
 
 async def startup():
-    await send_alert("🚀 <b>SMC Whale AI Started (Paper Mode)</b>\n\nQuality coins only - No meme coins!")
+    await send_alert("🚀 <b>SMC Whale (Paper Mode)</b>\n\nQuality coins only - No meme coins!")
 
 
 def heartbeat():
