@@ -8,7 +8,7 @@ async def execute_trade(signal):
     try:
         client = get_trade_client()
 
-        symbol = signal["symbol"].replace("/", "").upper()
+        symbol = signal["symbol"].split(":")[0].replace("/", "").upper()
         direction = signal["direction"]
         qty = str(signal["qty"])
         sl = signal.get("sl")
