@@ -2,7 +2,7 @@ import logging
 import asyncio
 from trade_manager import get_open_trades, get_balance
 from exchange import get_exchange
-from paper_trader import close_paper_trade_with_fees
+from bybit_executor import activate_trailing_stop
 from telegram_alerts import send_alert
 from xgboost_trainer import train_model_incremental
 
@@ -61,33 +61,54 @@ async def monitor_trades():
                 else:
                     continue
 
-                if not (hit_tp or hit_sl):
+                if hit_sl:
+                    # Close on Stop Loss
+                    exit_price = sl
+                    exit_reason = "Stop Loss Hit"
+
+                    logger.info(f"🚨 {exit_reason} on {symbol} at ${exit_price:.6f}")
+
+                    # For now we still use paper close for demo. 
+                    # You can replace with live close later.
+                    from paper_trader import close_paper_trade_with_fees
+                    pnl_after_fees = close_paper_trade_with_fees(trade, exit_price, exit_reason)
+
+                    balance = get_balance()["balance"]
+                    await send_alert(
+                        f"❌ {exit_reason}\n"
+                        f"{direction} {symbol}\n"
+                        f"Entry: ${entry:.6f} → Exit: ${exit_price:.6f}\n"
+                        f"Qty: {qty}\n"
+                        f"Net PnL: ${pnl_after_fees:.2f}\n"
+                        f"Balance: ${balance:.2f}"
+                    )
+                    train_model_incremental()
                     continue
 
-                exit_price = tp if hit_tp else sl
-                exit_reason = "Take Profit Hit" if hit_tp else "Stop Loss Hit"
+                if hit_tp:
+                    # Activate trailing stop instead of closing
+                    logger.info(f"🚀 Activating trailing stop on {symbol} (TP reached)")
 
-                logger.info(f"🚨 {exit_reason} on {symbol} at ${exit_price:.6f}")
+                    result = await activate_trailing_stop(
+                        symbol=symbol,
+                        direction=direction,
+                        qty=qty,
+                        trail_percent=0.5
+                    )
 
-                pnl_after_fees = close_paper_trade_with_fees(
-                    trade,
-                    exit_price,
-                    exit_reason
-                )
+                    if result:
+                        await send_alert(
+                            f"🚀 Trailing Stop Activated\n"
+                            f"{direction} {symbol}\n"
+                            f"Original TP: ${tp:.6f}\n"
+                            f"Current Price: ${current_price:.6f}\n"
+                            f"Trail: 0.5%"
+                        )
+                    else:
+                        logger.error(f"Failed to activate trailing stop for {symbol}")
 
-                balance = get_balance()["balance"]
-                status_emoji = "✅" if hit_tp else "❌"
-
-                await send_alert(
-                    f"{status_emoji} {exit_reason}\n"
-                    f"{direction} {symbol}\n"
-                    f"Entry: ${entry:.6f} → Exit: ${exit_price:.6f}\n"
-                    f"Qty: {qty}\n"
-                    f"Net PnL: ${pnl_after_fees:.2f}\n"
-                    f"Balance: ${balance:.2f}"
-                )
-
-                train_model_incremental()
+                    train_model_incremental()
+                    continue
 
             except Exception as e:
                 logger.exception(f"❌ Error monitoring trade {trade.get('symbol')}: {e}")
