@@ -2,12 +2,12 @@ import logging
 import time
 from exchange import get_trade_client
 from trade_manager import get_risk_amount
+from xgboost_trainer import get_ai_risk_percent, detect_market_regime
 
 logger = logging.getLogger(__name__)
 
 
 def get_symbol_info(symbol):
-    """Get market info for precision and limits"""
     client = get_trade_client()
     try:
         markets = client.load_markets()
@@ -20,9 +20,9 @@ def get_symbol_info(symbol):
         return None
 
 
-def calculate_proper_qty(symbol, entry_price, sl_price):
+def calculate_proper_qty(symbol, entry_price, sl_price, ai_prob=50, regime="ranging", recent_drawdown=0.0):
     """
-    Calculate quantity using dynamic risk (0.5% of balance by default).
+    Calculate quantity using AI-driven dynamic risk sizing.
     """
     market = get_symbol_info(symbol)
     if not market:
@@ -34,21 +34,24 @@ def calculate_proper_qty(symbol, entry_price, sl_price):
         if risk_per_unit == 0:
             return None
 
-        # Get dynamic risk amount from trade_manager
-        risk_amount = get_risk_amount()
+        # Get base risk amount (0.5% of balance)
+        base_risk = get_risk_amount()
 
-        raw_qty = risk_amount / risk_per_unit
+        # Adjust risk using AI confidence
+        adjusted_risk = base_risk * (get_ai_risk_percent(ai_prob, recent_drawdown, regime) / 0.5)
+
+        raw_qty = adjusted_risk / risk_per_unit
 
         # Apply exchange precision
         step = market.get("precision", {}).get("amount", 0.001)
         qty = round(raw_qty / step) * step
 
-        # Check min/max limits
+        # Check limits
         min_qty = market.get("limits", {}).get("amount", {}).get("min", 0)
         max_qty = market.get("limits", {}).get("amount", {}).get("max", 999999)
 
         if qty < min_qty:
-            logger.warning(f"Quantity {qty} below minimum {min_qty} for {symbol}")
+            logger.warning(f"Quantity {qty} below minimum for {symbol}")
             return None
         if qty > max_qty:
             qty = max_qty
@@ -61,7 +64,6 @@ def calculate_proper_qty(symbol, entry_price, sl_price):
 
 
 def set_leverage_if_needed(symbol, desired_leverage=10):
-    """Ensure correct leverage is set before trading"""
     client = get_trade_client()
     try:
         positions = client.fetch_positions([symbol])
@@ -78,7 +80,6 @@ def set_leverage_if_needed(symbol, desired_leverage=10):
 
 
 async def execute_trade(signal):
-    """Execute trade with dynamic risk, leverage, and SL/TP"""
     client = get_trade_client()
 
     try:
@@ -87,14 +88,16 @@ async def execute_trade(signal):
         entry = float(signal["entry"])
         sl = float(signal.get("sl", 0))
         tp = float(signal.get("tp", 0))
+        ai_prob = float(signal.get("ai_prob", 50))
+        regime = signal.get("market_regime", "ranging")
 
-        # 1. Calculate proper quantity using dynamic risk
-        qty = calculate_proper_qty(symbol, entry, sl)
+        # Calculate quantity using AI risk sizing
+        qty = calculate_proper_qty(symbol, entry, sl, ai_prob=ai_prob, regime=regime)
         if not qty:
-            logger.error(f"❌ Invalid quantity calculated for {symbol}")
+            logger.error(f"❌ Invalid quantity for {symbol}")
             return None
 
-        # 2. Ensure correct leverage
+        # Set leverage
         if not set_leverage_if_needed(symbol):
             logger.error(f"❌ Could not set leverage for {symbol}")
             return None
@@ -116,7 +119,6 @@ async def execute_trade(signal):
 
         logger.info(f"📤 Sending order: {params}")
 
-        # 3. Place order with retry
         result = None
         for attempt in range(3):
             try:
@@ -125,15 +127,13 @@ async def execute_trade(signal):
             except Exception as e:
                 if attempt == 2:
                     raise e
-                logger.warning(f"Retrying order ({attempt + 1}/3) due to: {e}")
+                logger.warning(f"Retrying order ({attempt + 1}/3)")
                 time.sleep(1.5)
 
         logger.info(f"📥 Bybit response: {result}")
 
         if result and result.get("retCode") == 0:
-            logger.info(f"✅ Order placed successfully for {symbol}")
-        else:
-            logger.warning(f"⚠️ Order may not have attached SL/TP properly")
+            logger.info(f"✅ Order placed: {symbol} | Qty: {qty} | AI Risk Adjusted")
 
         return result
 
@@ -143,7 +143,6 @@ async def execute_trade(signal):
 
 
 async def activate_trailing_stop(symbol, direction, qty, trail_percent=0.5, active_price=None):
-    """Activate Bybit native trailing stop"""
     client = get_trade_client()
     try:
         side = "Sell" if direction == "LONG" else "Buy"
@@ -162,9 +161,9 @@ async def activate_trailing_stop(symbol, direction, qty, trail_percent=0.5, acti
             params["activePrice"] = str(active_price)
 
         result = client.place_order(**params)
-        logger.info(f"🚀 Trailing stop activated on {symbol} | {trail_percent}%")
+        logger.info(f"🚀 Trailing stop activated: {symbol} | {trail_percent}%")
         return result
 
     except Exception as e:
-        logger.exception(f"Trailing stop activation failed: {e}")
+        logger.exception(f"Trailing stop failed: {e}")
         return None
