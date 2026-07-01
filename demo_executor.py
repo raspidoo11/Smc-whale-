@@ -1,6 +1,8 @@
 import os
 import logging
-from exchange import get_exchange
+from exchange import get_trade_client
+
+client = get_trade_client()
 
 logger = logging.getLogger(__name__)
 
