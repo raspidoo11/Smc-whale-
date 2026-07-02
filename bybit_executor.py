@@ -145,6 +145,15 @@ async def execute_trade(signal):
 async def activate_trailing_stop(symbol, direction, qty, trail_percent=0.5, active_price=None):
     client = get_trade_client()
     try:
+        # FIX: execute_trade() normalizes ccxt-style symbols
+        # (e.g. "RAVE/USDT:USDT" -> "RAVEUSDT") before sending to Bybit's
+        # raw API, but this function was taking `symbol` as-is. Whatever
+        # calls this (trade_monitor.py) was passing the ccxt-style symbol
+        # straight from the trade record, which Bybit's API rejects with
+        # ErrCode 10001 ("symbol invalid"). Normalizing here makes this
+        # safe regardless of what format the caller passes in.
+        symbol = symbol.split(":")[0].replace("/", "").upper()
+
         side = "Sell" if direction == "LONG" else "Buy"
 
         params = {
