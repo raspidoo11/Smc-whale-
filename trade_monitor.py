@@ -13,8 +13,8 @@ exchange = get_exchange()
 # How long to wait before retrying a failed trailing-stop activation, and how
 # many attempts to allow before giving up and force-closing the trade so it
 # can't get stuck open (and missing from training data) forever.
-RETRY_COOLDOWN_MINUTES = 5
-MAX_ACTIVATION_ATTEMPTS = 5
+RETRY_COOLDOWN_MINUTES = 1
+MAX_ACTIVATION_ATTEMPTS = 2
 
 
 async def get_current_price(symbol):
