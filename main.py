@@ -31,7 +31,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-exchange = get_exchange()
+if EXECUTE_TRADES:
+    exchange = get_exchange()
+else:
+    exchange = None
 
 # ==================== CONFIG ====================
 MAX_OPEN_TRADES = 10
@@ -81,9 +84,10 @@ async def scan():
                     if df_15m is None or df_5m is None:
                         continue
 
-                    signal = get_signal(df_15m, df_5m)
+                    signal = get_signal(symbol, df_15m, df_5m)
 
                     if signal:
+                        logger.info(f"✅ Signal Found | {symbol} | {signal['direction']} | Confidence={signal['confidence']}")
                         # Check for duplicate using signal_hash
                         if get_signal_hash_exists(signal.get("signal_hash")):
                             logger.info(f"⏭️ Duplicate signal_hash skipped: {symbol}")
@@ -131,11 +135,16 @@ async def scan():
                     "trade_no": trade_no,
                 }
 
-                order = await execute_trade(trade_data)
+                if EXECUTE_TRADES:
+                    order = await execute_trade(trade_data)
 
-                if not order:
-                    logger.error(f"❌ Failed to execute: {trade['symbol']}")
-                    continue
+                    if not order:
+                        logger.error(f"❌ Failed to execute: {trade['symbol']}")
+                        continue
+
+                    logger.info(f"✅ Live trade executed: {trade['symbol']}")
+                else:
+                    logger.info(f"📝 Paper Trade Opened: {trade['symbol']}")
 
                 add_trade(trade_data)
 
