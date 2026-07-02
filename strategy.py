@@ -99,6 +99,27 @@ def get_signal(df_15m, df_5m):
         bull_fvg = df_5m["low"].iloc[-1] > df_5m["high"].iloc[-3]
         bear_fvg = df_5m["high"].iloc[-1] < df_5m["low"].iloc[-3]
 
+        # ---- Continuous magnitude versions (in addition to the binary
+        # flags) so the model has something to actually split on once these
+        # aren't constant across every trade anymore. Normalized by ATR so
+        # they're comparable across symbols/volatility regimes.
+        sweep_strength = 0.0
+        if bull_sweep:
+            swing_low = df_5m["low"].iloc[-10:-1].min()
+            sweep_strength = (swing_low - latest["low"]) / max(atr, 0.0001)
+        elif bear_sweep:
+            swing_high = df_5m["high"].iloc[-10:-1].max()
+            sweep_strength = (latest["high"] - swing_high) / max(atr, 0.0001)
+
+        fvg_strength = 0.0
+        if bull_fvg:
+            fvg_strength = (df_5m["low"].iloc[-1] - df_5m["high"].iloc[-3]) / max(atr, 0.0001)
+        elif bear_fvg:
+            fvg_strength = (df_5m["low"].iloc[-3] - df_5m["high"].iloc[-1]) / max(atr, 0.0001)
+
+        volume_spike_strength = latest["volume"] / max(latest["volume_ma"], 0.0001)
+        displacement_strength = latest["body"] / max(atr, 0.0001)
+
         score = 0
         if latest["volume_spike"] == 1: score += 25
         if latest["displacement"] == 1: score += 25
@@ -194,6 +215,11 @@ def get_signal(df_15m, df_5m):
                 "regime_trending": 1 if regime == "trending" else 0,
                 "regime_ranging": 1 if regime == "ranging" else 0,
                 "regime_volatile": 1 if regime == "volatile" else 0,
+                # continuous SMC magnitude features
+                "sweep_strength": sweep_strength,
+                "fvg_strength": fvg_strength,
+                "volume_spike_strength": volume_spike_strength,
+                "displacement_strength": displacement_strength,
             }
 
             ai_prob = get_xgboost_probability(trade_features, recent_win_rate=context.get("recent_win_rate", 0.5))
@@ -225,6 +251,30 @@ def get_signal(df_15m, df_5m):
                 "session_bonus": session_bonus,
                 "market_regime": regime,
                 "atr_percentile": atr_percentile,
+
+                # ---- FIX: these were computed above but never included in
+                # the returned dict, so every closed trade in trade_history.json
+                # was missing them entirely. extract_pro_features_from_trade()
+                # then defaulted them to constants (0, 12, 2, ...) for every
+                # single trade, which is why the trainer showed zero importance
+                # for sweep/fvg/volume_spike/displacement and no session/time
+                # signal at all — it wasn't that the model ignored them, it
+                # never received them.
+                "volume_spike": int(latest["volume_spike"]),
+                "displacement": int(latest["displacement"]),
+                "sweep": 1 if (bull_sweep or bear_sweep) else 0,
+                "fvg": 1 if (bull_fvg or bear_fvg) else 0,
+                "sweep_strength": round(float(sweep_strength), 4),
+                "fvg_strength": round(float(fvg_strength), 4),
+                "volume_spike_strength": round(float(volume_spike_strength), 4),
+                "displacement_strength": round(float(displacement_strength), 4),
+                "atr": float(atr),
+                "body": float(latest["body"]),
+                "volume": float(latest["volume"]),
+                "volume_ma": float(latest["volume_ma"]),
+                "hour": hour,
+                "day_of_week": day_of_week,
+
                 **session_info
             }
 
