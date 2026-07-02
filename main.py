@@ -23,6 +23,7 @@ from trade_manager import (
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model_incremental
 from trade_manager import get_trade_history
+from bybit_executor import EXECUTE_TRADES
 
 logging.basicConfig(
     level=logging.INFO,
@@ -99,7 +100,7 @@ async def scan():
                 logger.info("No valid signals this scan.")
                 return
 
-            # Rank by confidence
+            # Rank by confidence (session bonus already applied in strategy)
             results.sort(key=lambda x: x.get("confidence", 0), reverse=True)
             top_signals = results[:3]
 
@@ -108,8 +109,18 @@ async def scan():
                     break
 
                 trade_no = next_trade_number()
+                balance = get_balance()["balance"]
 
-                # Build trade data (preserve everything from strategy)
+                # FIX: previously this rebuilt a trimmed whitelist dict here,
+                # which silently dropped sweep/fvg/volume_spike/displacement,
+                # atr/body/volume/volume_ma, hour/day_of_week, market_regime,
+                # atr_percentile, and ai_prob before they ever reached
+                # trade_history.json. That's why the trainer's feature
+                # importance report showed those features at 0.000 — they
+                # were never persisted, not "learned and ignored." Spreading
+                # `trade` (symbol + full signal dict + qty) preserves
+                # everything strategy.py computed, then we layer on the
+                # execution-specific fields on top.
                 trade_data = {
                     **trade,
                     "entry": float(trade["entry"]),
@@ -132,26 +143,16 @@ async def scan():
                 if trade.get("signal_hash"):
                     save_signal_hash(trade["signal_hash"])
 
-                # ==================== IMPROVED TELEGRAM ALERT ====================
-                direction = trade.get('direction', 'LONG')
-                is_long = direction == "LONG"
-                dir_emoji = "🟢" if is_long else "🔴"
+                await send_alert(f"""
+<b>#{trade_no}</b> | {trade['symbol']} {trade['direction']}
 
-                alert_text = f"""
-{dir_emoji} <b>#{trade_no}</b> | {trade['symbol']} {dir_emoji} <b>{direction}</b>
-
-💰 <b>Entry</b>:   <code>${trade['entry']:.6f}</code>
-
-❌ <b>SL</b>:       <code>${trade['sl']:.6f}</code>
-
-✅ <b>TP</b>:       <code>${trade['tp']:.6f}</code>
-
-🗑️ <b>Qty</b>:      <code>{trade['qty']:.4f}</code>
-
-🔥 <b>Confidence</b>: <b>{trade.get('confidence', 0)}/100</b>
-"""
-
-                await send_alert(alert_text.strip())
+Entry: <b>${trade['entry']:.6f}</b>
+SL: <b>${trade['sl']:.6f}</b>
+TP: <b>${trade['tp']:.6f}</b>
+Qty: <b>{trade['qty']:.4f}</b>
+Confidence: <b>{trade.get('confidence', 0)}/100</b>
+Session Bonus: <b>{trade.get('session_bonus', 0)}</b>
+""")
 
             # Retrain model periodically
             if len(get_trade_history()) >= 10:
@@ -201,6 +202,7 @@ def main():
     logger.info("🚀 Starting SMC Whale AI (Improved Version)")
     logger.info(f"📊 Max Open Trades: {MAX_OPEN_TRADES}")
     logger.info("🔒 Using asyncio.Lock() for scan protection")
+    logger.info("🕒 Session bonus system enabled")
 
     asyncio.run(startup())
     run_scan_sync()
