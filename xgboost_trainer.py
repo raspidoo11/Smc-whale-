@@ -249,15 +249,30 @@ def calculate_realized_r(trade):
 # ---------------------------------------------------------------------------
 
 def load_json(path, default):
-    if Path(path).exists():
+    if not Path(path).exists():
+        return default
+    try:
         with open(path, "r") as f:
             return json.load(f)
-    return default
+    except (json.JSONDecodeError, OSError) as e:
+        logger.warning(f"Corrupted or unreadable JSON at {path} ({e}) — using default and backing up the bad file")
+        try:
+            corrupt_backup = f"{path}.corrupt.{int(datetime.utcnow().timestamp())}"
+            os.replace(path, corrupt_backup)
+        except OSError:
+            pass
+        return default
 
 
 def save_json(path, data):
-    with open(path, "w") as f:
+    """Atomic write: write to a temp file first, then rename into place.
+    Prevents corruption if the process is killed/restarted mid-write."""
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w") as f:
         json.dump(data, f, indent=2, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
 
 
 def load_feature_history():
