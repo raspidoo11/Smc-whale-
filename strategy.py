@@ -118,7 +118,7 @@ def bearish_bos(df, structure_lookback=10, confirm_candles=2):
 # MAIN SIGNAL ENGINE
 # ==========================================================
 
-def get_signal(df_15m, df_5m):
+def get_signal(symbol, df_15m, df_5m):
 
     try:
 
@@ -505,6 +505,8 @@ def get_signal(df_15m, df_5m):
 
             f"""
 ================ SIGNAL SCAN ================
+
+Symbol            : {symbol}
 
 Mode              : {'AI' if USE_XGBOOST else 'SMC'}
 
