@@ -198,12 +198,22 @@ async def execute_trade(signal):
 async def activate_trailing_stop(symbol, direction, qty, trail_percent=0.5, active_price=None):
     """
     Activates trailing stop using Pybit.
-    Normalizes symbol to Bybit raw format.
+    Respects EXECUTE_TRADES=false (paper mode).
     """
+    # Respect paper trading mode - do not place any orders
+    if os.getenv("EXECUTE_TRADES", "false").lower() != "true":
+        logger.info(f"📄 Paper mode - Skipping trailing stop activation for {symbol}")
+        return {"paper_mode": True, "symbol": symbol}
+
     client = get_trade_client()
     try:
         # Normalize to Bybit raw symbol (important!)
         raw_symbol = symbol.split(":")[0].replace("/", "").upper()
+
+        # Basic qty validation
+        if not qty or float(qty) <= 0:
+            logger.error(f"Invalid qty for trailing stop on {raw_symbol}: {qty}")
+            return None
 
         side = "Sell" if direction == "LONG" else "Buy"
 
