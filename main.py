@@ -154,16 +154,20 @@ async def scan():
                     save_signal_hash(trade["signal_hash"])
 
                 await send_alert(f"""
-<b>#{trade_no}</b> | {trade['symbol']} {trade['direction']}
+🚨 <b>SMC WHALE SIGNAL #{trade_no}</b>
 
-Entry: <b>${trade['entry']:.6f}</b>
-SL: <b>${trade['sl']:.6f}</b>
-TP: <b>${trade['tp']:.6f}</b>
-Qty: <b>{trade['qty']:.4f}</b>
-Confidence: <b>{trade.get('confidence', 0)}/100</b>
-Session Bonus: <b>{trade.get('session_bonus', 0)}</b>
+🪙 <b>Pair:</b> {trade['symbol']}
+📈 <b>Direction:</b> {'🟢 LONG' if trade['direction']=='LONG' else '🔴 SHORT'}
+
+💰 <b>Entry:</b> <code>{trade['entry']:.6f}</code>
+
+🛑 <b>Stop Loss:</b> <code>{trade['sl']:.6f}</code>
+
+🎯 <b>Take Profit:</b> <code>{trade['tp']:.6f}</code>
+
+📦 <b>Quantity:</b> {trade['qty']:.4f}
+🔥 <b>Confidence:</b> {trade['confidence']}%
 """)
-
             # Retrain model periodically
             if len(get_trade_history()) >= 10:
                 train_model_incremental()
