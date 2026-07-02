@@ -1,10 +1,17 @@
 import logging
+import os
 import time
 from exchange import get_trade_client
 from trade_manager import get_risk_amount
 from xgboost_trainer import get_ai_risk_percent, detect_market_regime
 
 logger = logging.getLogger(__name__)
+
+# Confirm this exact variable name matches what you set in Railway. If it
+# doesn't exist in the environment at all, this defaults to True (trades
+# execute) -- so double check the Railway Variables tab shows exactly
+# EXECUTE_TRADES = false, not a typo'd name.
+EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
 
 
 def get_symbol_info(symbol):
@@ -80,6 +87,10 @@ def set_leverage_if_needed(symbol, desired_leverage=10):
 
 
 async def execute_trade(signal):
+    if not EXECUTE_TRADES:
+        logger.info(f"⏸️ EXECUTE_TRADES=false — skipping order for {signal.get('symbol')} (no Bybit call made)")
+        return None
+
     client = get_trade_client()
 
     try:
@@ -187,6 +198,10 @@ def get_last_closed_pnl(symbol):
 
 
 async def activate_trailing_stop(symbol, direction, qty, trail_percent=0.5, active_price=None):
+    if not EXECUTE_TRADES:
+        logger.info(f"⏸️ EXECUTE_TRADES=false — skipping trailing stop for {symbol} (no Bybit call made)")
+        return None
+
     client = get_trade_client()
     try:
         symbol = symbol.split(":")[0].replace("/", "").upper()
