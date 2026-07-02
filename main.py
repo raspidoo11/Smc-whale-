@@ -110,18 +110,24 @@ async def scan():
                 trade_no = next_trade_number()
                 balance = get_balance()["balance"]
 
+                # FIX: previously this rebuilt a trimmed whitelist dict here,
+                # which silently dropped sweep/fvg/volume_spike/displacement,
+                # atr/body/volume/volume_ma, hour/day_of_week, market_regime,
+                # atr_percentile, and ai_prob before they ever reached
+                # trade_history.json. That's why the trainer's feature
+                # importance report showed those features at 0.000 — they
+                # were never persisted, not "learned and ignored." Spreading
+                # `trade` (symbol + full signal dict + qty) preserves
+                # everything strategy.py computed, then we layer on the
+                # execution-specific fields on top.
                 trade_data = {
-                    "symbol": trade["symbol"],
-                    "direction": trade["direction"],
+                    **trade,
                     "entry": float(trade["entry"]),
                     "sl": float(trade["sl"]),
                     "tp": float(trade["tp"]),
                     "qty": float(trade["qty"]),
                     "status": "OPEN",
                     "trade_no": trade_no,
-                    "signal_hash": trade.get("signal_hash"),
-                    "session": trade.get("session_info", {}),
-                    "confidence": trade.get("confidence", 0)
                 }
 
                 order = await execute_trade(trade_data)
