@@ -32,7 +32,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 if EXECUTE_TRADES:
+    if EXECUTE_TRADES:
     exchange = get_exchange()
+else:
+    exchange = None
 else:
     exchange = None
 
@@ -87,6 +90,7 @@ async def scan():
                     signal = get_signal(symbol, df_15m, df_5m)
 
                     if signal:
+                        logger.info(f"✅ Signal Found | {symbol} | {signal['direction']} | Confidence={signal['confidence']}")
                         logger.info(f"✅ Signal Found | {symbol} | {signal['direction']} | Confidence={signal['confidence']}")
                         # Check for duplicate using signal_hash
                         if get_signal_hash_exists(signal.get("signal_hash")):
