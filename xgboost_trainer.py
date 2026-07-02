@@ -3,6 +3,7 @@ import numpy as np
 import logging
 import joblib
 import os
+import json
 from pathlib import Path
 from datetime import datetime
 from xgboost import XGBClassifier
@@ -12,8 +13,12 @@ logger = logging.getLogger(__name__)
 
 MODEL_PATH = "/app/data/models/xgboost_model.pkl"
 FEATURE_PATH = "/app/data/models/feature_names.pkl"
+FEATURE_HISTORY_PATH = "/app/data/models/feature_importance_history.json"
 
 os.makedirs("/app/data/models", exist_ok=True)
+
+ROLLING_WINDOW_SIZE = 220          # Use last ~220 trades
+RETRAIN_EVERY_N_TRADES = 5         # Retrain after every 5 new closed trades
 
 
 def calculate_atr_percentile(atr_series, current_atr, window=50):
@@ -82,7 +87,6 @@ def extract_pro_features_from_trade(trade, historical_context=None, regime="rang
     features["regime_ranging"] = 1 if regime == "ranging" else 0
     features["regime_volatile"] = 1 if regime == "volatile" else 0
 
-    # === Phase 8: Market Structure Features ===
     features["distance_to_prev_high"] = trade.get("distance_to_prev_high", 0)
     features["distance_to_prev_low"] = trade.get("distance_to_prev_low", 0)
     features["distance_to_ema20"] = trade.get("distance_to_ema20", 0)
@@ -135,13 +139,13 @@ def extract_pro_features_from_trade(trade, historical_context=None, regime="rang
         features["cumulative_pnl"] = 0
         features["current_dd_pct"] = 0
 
-    # Phase 8: More Feature Interactions
     features["volume_x_displacement"] = trade.get("volume_spike", 0) * trade.get("displacement", 0)
     features["sweep_x_fvg"] = trade.get("sweep", 0) * trade.get("fvg", 0)
     features["volatility_x_risk"] = atr * features["risk_pct"]
     features["atr_x_confluence"] = atr * (confluence_score / 4.0)
     features["atr_x_session"] = atr * (1 if 7 <= hour <= 16 else 0)
     features["fvg_x_sweep"] = trade.get("fvg", 0) * trade.get("sweep", 0)
+    features["rr_x_atr"] = features["risk_reward"] * atr
 
     return features
 
@@ -184,12 +188,51 @@ def calculate_historical_context(history):
     }
 
 
-def train_model_incremental():
+def load_feature_history():
+    if Path(FEATURE_HISTORY_PATH).exists():
+        with open(FEATURE_HISTORY_PATH, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def save_feature_history(history):
+    with open(FEATURE_HISTORY_PATH, "w") as f:
+        json.dump(history, f, indent=2)
+
+
+def update_feature_importance_history(current_importance, history, decay_factor=0.85):
+    for feature, importance in current_importance.items():
+        if feature not in history:
+            history[feature] = {"recent_importance": [], "decay_multiplier": 1.0}
+
+        history[feature]["recent_importance"].append(importance)
+        if len(history[feature]["recent_importance"]) > 10:
+            history[feature]["recent_importance"].pop(0)
+
+        avg_importance = np.mean(history[feature]["recent_importance"])
+
+        if avg_importance < 0.01:
+            history[feature]["decay_multiplier"] = max(0.3, history[feature]["decay_multiplier"] * decay_factor)
+        else:
+            history[feature]["decay_multiplier"] = min(1.0, history[feature]["decay_multiplier"] / decay_factor)
+
+    return history
+
+
+def train_model_incremental(force_retrain=False):
+    """
+    Phase 12/13: Online-style learning with rolling window + frequent retraining
+    """
     history = get_trade_history()
 
     if len(history) < 30:
         logger.info(f"Waiting for trades ({len(history)}/30)")
         return None
+
+    # Use rolling window
+    if len(history) > ROLLING_WINDOW_SIZE:
+        history = history[-ROLLING_WINDOW_SIZE:]
+        logger.info(f"📉 Rolling Window Active: Using last {ROLLING_WINDOW_SIZE} trades")
 
     context = calculate_historical_context(history[:-1])
 
@@ -202,7 +245,7 @@ def train_model_incremental():
         row["target"] = 1 if trade["status"] == "WIN" else 0
         rows.append(row)
 
-    if len(rows) < 30:
+    if len(rows) < 20:
         return None
 
     df = pd.DataFrame(rows)
@@ -213,6 +256,8 @@ def train_model_incremental():
     win_count = int((y == 1).sum())
     loss_count = int((y == 0).sum())
     win_rate = win_count / max(len(y), 1)
+
+    feature_history = load_feature_history()
 
     model = XGBClassifier(
         n_estimators=140,
@@ -235,9 +280,14 @@ def train_model_incremental():
     joblib.dump(model, MODEL_PATH)
     joblib.dump(X.columns.tolist(), FEATURE_PATH)
 
+    current_importance = dict(zip(X.columns, model.feature_importances_))
+    feature_history = update_feature_importance_history(current_importance, feature_history)
+    save_feature_history(feature_history)
+
     train_accuracy = model.score(X, y)
 
-    logger.info(f"\n✅ MODEL UPDATED (Phase 8)!")
+    logger.info(f"\n✅ MODEL UPDATED (Online/Rolling Mode)!")
+    logger.info(f"   Using rolling window of last {min(len(history), ROLLING_WINDOW_SIZE)} trades")
     logger.info(f"   Trades Learned: {len(rows)} (W: {win_count}, L: {loss_count})")
     logger.info(f"   Win Rate: {win_rate:.1%}")
     logger.info(f"   Train Accuracy: {train_accuracy:.3f}")
@@ -249,13 +299,8 @@ def train_model_incremental():
 
     logger.info(f"\n   📊 Top 10 Features:")
     for idx, row in feature_importance.head(10).iterrows():
-        logger.info(f"      {row['feature']}: {row['importance']:.3f}")
-
-    # Phase 8: Enhanced Self-Diagnosis
-    logger.info(f"\n   🩺 Self-Diagnosis Report:")
-    logger.info(f"      Total Features Used: {len(X.columns)}")
-    logger.info(f"      Top 3 Features: {', '.join(feature_importance.head(3)['feature'].tolist())}")
-    logger.info(f"      Model Stability (Train Acc): {train_accuracy:.1%}")
+        decay = feature_history.get(row['feature'], {}).get('decay_multiplier', 1.0)
+        logger.info(f"      {row['feature']}: {row['importance']:.3f} (decay: {decay:.2f})")
 
     if len(history) > 0:
         last_trade = history[-1]
@@ -285,7 +330,6 @@ def get_xgboost_probability(trade_features, recent_win_rate=0.5):
         X = X.select_dtypes(include=[np.number]).fillna(0)
 
         raw_prob = model.predict_proba(X)[0][1] * 100
-
         performance_adjustment = (recent_win_rate - 0.5) * 8
         calibrated_prob = raw_prob + performance_adjustment
         calibrated_prob = max(5, min(95, calibrated_prob))
@@ -303,44 +347,43 @@ def get_dynamic_confidence_threshold(regime="ranging", atr_percentile=50, recent
     if regime == "trending":
         base_threshold -= 5
     elif regime == "volatile":
-        base_threshold += 8
+        base_threshold += 10
     elif regime == "ranging":
-        base_threshold += 5
+        base_threshold += 6
 
     if recent_win_rate > 0.55:
-        base_threshold -= 5
+        base_threshold -= 6
     elif recent_win_rate < 0.40:
-        base_threshold += 10
+        base_threshold += 12
 
     if atr_percentile > 80:
-        base_threshold += 5
+        base_threshold += 6
     elif atr_percentile < 20:
-        base_threshold -= 3
+        base_threshold -= 4
 
-    final_threshold = max(25, min(70, base_threshold))
-    return final_threshold
+    return max(30, min(75, base_threshold))
 
 
 def get_ai_risk_percent(ai_prob, recent_drawdown=0.0, regime="ranging"):
     base_risk = 0.5
 
-    if ai_prob >= 75:
-        risk = base_risk * 1.8
-    elif ai_prob >= 65:
-        risk = base_risk * 1.4
-    elif ai_prob >= 55:
-        risk = base_risk * 1.1
+    if ai_prob >= 80:
+        risk = base_risk * 2.0
+    elif ai_prob >= 70:
+        risk = base_risk * 1.6
+    elif ai_prob >= 60:
+        risk = base_risk * 1.2
     else:
-        risk = base_risk * 0.7
+        risk = base_risk * 0.6
 
     if recent_drawdown > 5:
-        risk *= 0.7
+        risk *= 0.6
     elif recent_drawdown > 10:
-        risk *= 0.5
+        risk *= 0.4
 
     if regime == "volatile":
-        risk *= 0.8
+        risk *= 0.75
     elif regime == "trending":
-        risk *= 1.1
+        risk *= 1.15
 
-    return round(max(0.2, min(2.0, risk)), 2)
+    return round(max(0.2, min(2.5, risk)), 2)
