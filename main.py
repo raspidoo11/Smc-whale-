@@ -32,10 +32,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 if EXECUTE_TRADES:
-    if EXECUTE_TRADES:
     exchange = get_exchange()
-else:
-    exchange = None
 else:
     exchange = None
 
