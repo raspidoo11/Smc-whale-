@@ -3,9 +3,6 @@ import logging
 import os
 from datetime import datetime, timezone
 from news_filter import is_high_impact_news_time
-
-if is_high_impact_news_time(minutes_before=30, minutes_after=30):
-    return None   # Skip signal during high-impact news
 from trade_manager import get_trade_history
 from xgboost_trainer import (
     calculate_historical_context,
@@ -90,6 +87,10 @@ def get_signal(df_15m, df_5m):
         atr = latest["atr"]
 
         if pd.isna(atr) or atr <= 0:
+            return None
+        # ==================== NEWS FILTER ====================
+        if is_high_impact_news_time(minutes_before=30, minutes_after=30):
+            logger.info("🚫 Skipping signal - High impact news window active")
             return None
 
         bull_sweep = (latest["low"] < df_5m["low"].iloc[-10:-1].min() and latest["close"] > latest["open"])
