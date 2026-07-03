@@ -101,21 +101,34 @@ def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str
     # Update account balance
     update_balance(pnl_after_fees)
 
-    # Close trade and get the stored trade back
+    # --- FIX #1: status was previously determined by matching exit_reason
+    # against the literal string "Take Profit Hit" -- a string that no
+    # longer exists anywhere in trade_monitor.py's current exit paths
+    # ("Stop Loss Hit", "Trailing Stop Hit", "Trailing Stop Failed - Forced
+    # Close", etc). Every trade fell through to the else branch and was
+    # labeled LOSS regardless of actual outcome. Deriving status from the
+    # real pnl sign is correct by construction and can't drift out of sync
+    # with whatever wording trade_monitor.py uses for exit_reason in future.
+    status = "WIN" if pnl_after_fees > 0 else "LOSS"
+
+    # --- FIX #2: pnl/fees used to be set on the dict AFTER close_trade()
+    # had already saved it to trade_history.json, so they never actually
+    # persisted (pnl stayed None forever). Passing them as extra_fields
+    # means they're merged onto the trade before it's written.
     closed_trade = close_trade(
         trade["symbol"],
         exit_price,
-        "WIN" if exit_reason == "Take Profit Hit" else "LOSS"
+        status,
+        extra_fields={
+            "pnl": round(pnl_after_fees, 2),
+            "entry_fee": trade.get("entry_fee", 0),
+            "exit_fee": exit_fee,
+            "exit_reason": exit_reason,
+        },
     )
 
-    # Store ML information for training
-    if closed_trade:
-        closed_trade["pnl"] = round(pnl_after_fees, 2)
-        closed_trade["entry_fee"] = trade.get("entry_fee", 0)
-        closed_trade["exit_fee"] = exit_fee
-
     logger.info(
-        f"✅ CLOSED {trade['symbol']} | {exit_reason} | "
+        f"✅ CLOSED {trade['symbol']} | {exit_reason} | {status} | "
         f"Raw PnL: ${pnl:.2f} | Exit Fee: ${exit_fee:.2f} | "
         f"Net PnL: ${pnl_after_fees:.2f}"
     )
