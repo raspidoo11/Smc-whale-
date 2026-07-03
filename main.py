@@ -172,22 +172,21 @@ async def scan():
         except Exception as e:
             logger.exception(f"SCAN FAILED: {e}")
 
-        # Retrain model periodically. This is now OUTSIDE the scan try/except
-        # above and has its own handler, on purpose: it used to be the last
-        # line inside that block, so any earlier failure in the scan cycle
-        # (signal execution, add_trade, send_alert's Telegram call, etc.)
-        # would jump straight to "SCAN FAILED" and skip training entirely,
-        # with zero training-specific log output. Training should not depend
-        # on the rest of the scan succeeding.
-        try:
-            trade_count = len(get_trade_history())
-            if trade_count >= 10:
-                logger.info(f"🧠 Triggering train_model_incremental() (trade_count={trade_count})")
-                train_model_incremental()
-            else:
-                logger.info(f"🧠 Skipping retrain, not enough trades yet ({trade_count}/10)")
-        except Exception as e:
-            logger.exception(f"MODEL RETRAIN FAILED: {e}")
+        # NOTE: model retraining used to live here, at the end of scan()'s
+        # try block. That was broken two ways in a row:
+        #   1. It was the last line inside the try, so any exception earlier
+        #      in the scan (execute_trade, send_alert, etc.) skipped it via
+        #      "SCAN FAILED" — but you confirmed SCAN FAILED never appears.
+        #   2. More importantly: scan() has THREE early `return` statements
+        #      above (daily loss limit reached / max open trades reached /
+        #      "no valid signals this scan") that exit the whole coroutine,
+        #      not just the try block. "No valid signals" is the common
+        #      case, so training was being skipped on most cycles even
+        #      without any error at all — silently, by design, no log line.
+        # Retraining is now its own independent scheduled job (see
+        # run_retrain_sync below + the schedule.every(...) line in main()),
+        # decoupled entirely from whether scan() found signals, executed
+        # trades, or hit an error.
 
 
 # ==================== SCHEDULER WRAPPERS ====================
@@ -197,6 +196,22 @@ async def run_monitor():
         await monitor_trades()
     except Exception as e:
         logger.exception(f"Monitor error: {e}")
+
+
+def retrain_model():
+    """Independent retrain job — deliberately NOT called from inside scan(),
+    since scan() has multiple early `return`s (no signals / max trades /
+    daily limit hit) that would skip it silently. Runs on its own schedule
+    instead, so it always gets a chance to fire regardless of scan outcome."""
+    try:
+        trade_count = len(get_trade_history())
+        if trade_count >= 10:
+            logger.info(f"🧠 Triggering train_model_incremental() (trade_count={trade_count})")
+            train_model_incremental()
+        else:
+            logger.info(f"🧠 Skipping retrain, not enough trades yet ({trade_count}/10)")
+    except Exception as e:
+        logger.exception(f"MODEL RETRAIN FAILED: {e}")
 
 
 def run_scan_sync():
@@ -235,10 +250,12 @@ def main():
     asyncio.run(startup())
     run_scan_sync()
     run_monitor_sync()
+    retrain_model()
 
     schedule.every(1).minutes.do(heartbeat)
     schedule.every(35).seconds.do(run_monitor_sync)
     schedule.every(5).minutes.do(run_scan_sync)
+    schedule.every(10).minutes.do(retrain_model)
     schedule.every().day.at("00:00").do(daily_reset)
 
     logger.info("✅ Scheduler started")
