@@ -11,6 +11,7 @@ from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
+from sklearn.model_selection import train_test_split
 from trade_manager import get_trade_history
 
 logger = logging.getLogger(__name__)
@@ -354,6 +355,53 @@ def make_sample_weights(n, half_life=60):
     return 0.5 ** (ages / half_life)
 
 
+def split_train_holdout(df, holdout_size):
+    """
+    Build a train/holdout split for the classifier.
+
+    Historically this was a strict chronological split (train = everything
+    except the last `holdout_size` rows). That's the "honest" walk-forward
+    approach, but it has a failure mode: if the *training* slice happens to
+    land on a streak (e.g. the bot's first 20+ closed trades were all WINs,
+    or all LOSSes), `y_train.nunique() < 2` and training silently skips
+    forever — even once the full window has both classes — because the
+    fixed training slice never changes composition until the streak ages
+    out of the rolling window.
+
+    Fix: try a class-stratified split first, so both splits are guaranteed
+    to contain both classes whenever the full window does. We keep each
+    split sorted back into chronological order afterward so the recency
+    sample-weighting in `make_sample_weights` still behaves sensibly.
+    Falls back to the old chronological split if stratification isn't
+    possible (e.g. a class has fewer members than needed for the split).
+    """
+    try:
+        train_df, test_df = train_test_split(
+            df,
+            test_size=holdout_size,
+            stratify=df["target"],
+            shuffle=True,
+            random_state=42,
+        )
+        train_df = train_df.sort_index()
+        test_df = test_df.sort_index()
+        logger.info(
+            f"   Split method: stratified (train={len(train_df)}, holdout={len(test_df)})"
+        )
+        return train_df, test_df
+    except ValueError as e:
+        logger.warning(
+            f"Stratified split failed ({e}) — falling back to chronological split. "
+            f"This can happen if one class has very few trades."
+        )
+        train_df = df.iloc[:-holdout_size]
+        test_df = df.iloc[-holdout_size:]
+        logger.info(
+            f"   Split method: chronological fallback (train={len(train_df)}, holdout={len(test_df)})"
+        )
+        return train_df, test_df
+
+
 # ---------------------------------------------------------------------------
 # Ensemble (spec item 7 — kept to 2 models; CatBoost/RandomForest skipped,
 # see conversation notes on why a 4-way ensemble isn't appropriate at this N)
@@ -583,6 +631,29 @@ def explain_prediction(raw_model, X_row, top_n=5):
 
 
 # ---------------------------------------------------------------------------
+# Helper: log + verify that a joblib file actually landed on disk
+# ---------------------------------------------------------------------------
+
+def _dump_and_verify(obj, path, label):
+    """joblib.dump() doesn't raise on most silent failures (e.g. a bad mount
+    path that still resolves to a writable-but-wrong directory), so we
+    explicitly re-check Path.exists() + file size after every save and log
+    the outcome. This is what you should grep your logs for to confirm the
+    model actually landed on disk."""
+    try:
+        joblib.dump(obj, path)
+        p = Path(path)
+        if p.exists():
+            size_kb = p.stat().st_size / 1024
+            logger.info(f"   💾 Saved {label} → {path} ({size_kb:.1f} KB) ✅ confirmed on disk")
+        else:
+            logger.error(f"   ❌ {label} save reported no error, but {path} does NOT exist on disk!")
+    except Exception as e:
+        logger.error(f"   ❌ Failed to save {label} to {path}: {e}")
+        raise
+
+
+# ---------------------------------------------------------------------------
 # Main training entry point
 # ---------------------------------------------------------------------------
 
@@ -591,11 +662,20 @@ def train_model_incremental(force_retrain=False):
     Phase 15: walk-forward context + calibrated 2-model ensemble +
     champion/challenger promotion + expected-R regression + self-diagnostics
     + overfit detection + full metadata persistence.
+
+    Phase 16 fix: stratified train/holdout split (see split_train_holdout)
+    so an early WIN or LOSS streak can no longer permanently starve training
+    of both classes. Also adds explicit "is training actually running /
+    did the files really get written" logging throughout.
     """
+    logger.info("=" * 60)
+    logger.info("🚀 train_model_incremental() called")
+
     history = get_trade_history()
+    logger.info(f"   Total trade history rows: {len(history)}")
 
     if len(history) < MIN_TRADES_TO_TRAIN:
-        logger.info(f"Waiting for trades ({len(history)}/{MIN_TRADES_TO_TRAIN})")
+        logger.info(f"⏳ Waiting for trades ({len(history)}/{MIN_TRADES_TO_TRAIN}) — skipping this run")
         return None
 
     full_history_for_diagnostics = history  # diagnostics look at everything, not just the rolling window
@@ -605,27 +685,51 @@ def train_model_incremental(force_retrain=False):
         logger.info(f"📉 Rolling Window Active: Using last {ROLLING_WINDOW_SIZE} trades")
 
     df = build_feature_frame(history)
+    logger.info(f"   Labeled (WIN/LOSS) trades available for training: {len(df)}")
+
     if len(df) < 20:
-        logger.info(f"Not enough labeled trades to train ({len(df)}/20)")
+        logger.info(f"⏳ Not enough labeled trades to train ({len(df)}/20) — skipping this run")
+        return None
+
+    # Guard: if the ENTIRE window is single-class, there is genuinely nothing
+    # to learn yet (this is different from the old bug, where a single-class
+    # *slice* of an otherwise-mixed window blocked training forever).
+    if df["target"].nunique() < 2:
+        win_ct = int((df["target"] == 1).sum())
+        loss_ct = int((df["target"] == 0).sum())
+        logger.info(
+            f"⏳ Skipping retrain: entire rolling window has only one class so far "
+            f"(WIN={win_ct}, LOSS={loss_ct}). Need at least one of each to train."
+        )
         return None
 
     holdout_size = min(MIN_HOLDOUT_SIZE, max(5, len(df) // 5))
-    train_df = df.iloc[:-holdout_size]
-    test_df = df.iloc[-holdout_size:]
+    train_df, test_df = split_train_holdout(df, holdout_size)
 
     feature_history = load_feature_history()
     use_ensemble = len(train_df) >= MIN_TRADES_FOR_ENSEMBLE
+    logger.info(f"   Model family: {'XGBoost+LightGBM ensemble' if use_ensemble else 'Logistic regression only'} "
+                f"(train size={len(train_df)}, ensemble threshold={MIN_TRADES_FOR_ENSEMBLE})")
 
     X_train, y_train = prepare_X_y(train_df, feature_history)
     X_test, y_test = prepare_X_y(test_df, feature_history)
     X_test = X_test.reindex(columns=X_train.columns, fill_value=0)
 
     if y_train.nunique() < 2:
-        logger.info("Training data has only one class, skipping retrain")
+        # Should be rare now that split_train_holdout stratifies, but keep
+        # as a final safety net (e.g. a class with fewer members than holdout_size).
+        win_ct = int((y_train == 1).sum())
+        loss_ct = int((y_train == 0).sum())
+        logger.info(
+            f"⏳ Training data has only one class after split (WIN={win_ct}, LOSS={loss_ct}), "
+            f"skipping retrain this run"
+        )
         return None
 
+    logger.info("   🔧 Fitting challenger model on train split...")
     challenger, challenger_raw_models, model_type = fit_candidate_model(X_train, y_train, use_ensemble=use_ensemble)
     challenger_metrics = evaluate_model(challenger, X_test, y_test)
+    logger.info(f"   Challenger holdout metrics: {challenger_metrics}")
 
     # Overfit detection (spec item 13): compare train-set AUC to honest holdout AUC.
     train_metrics = evaluate_model(challenger, X_train, y_train)
@@ -639,6 +743,7 @@ def train_model_incremental(force_retrain=False):
 
     # Refit on the full window for the model that actually gets promoted, but
     # the promotion decision itself is based on the honest holdout above.
+    logger.info("   🔧 Refitting final model on full window...")
     X_full, y_full = prepare_X_y(df, feature_history)
     final_model, final_raw_models, _ = fit_candidate_model(X_full, y_full, use_ensemble=use_ensemble)
 
@@ -647,10 +752,13 @@ def train_model_incremental(force_retrain=False):
     r_target = df["realized_r"].loc[X_full.index] if "realized_r" in df.columns else None
     if r_target is not None and r_target.notna().sum() >= 20:
         try:
+            logger.info("   🔧 Fitting expected-R regression model...")
             r_model = fit_expected_r_model(X_full, r_target)
-            joblib.dump(r_model, EXPECTED_R_MODEL_PATH)
+            _dump_and_verify(r_model, EXPECTED_R_MODEL_PATH, "expected-R model")
         except Exception as e:
             logger.warning(f"Expected-R model training failed: {e}")
+    else:
+        logger.info("   Skipping expected-R model (not enough realized_r data yet)")
 
     metrics_history = load_metrics_history()
     champion_metrics = None
@@ -661,8 +769,11 @@ def train_model_incremental(force_retrain=False):
             champion_features = joblib.load(FEATURE_PATH)
             X_test_champ = X_test.reindex(columns=champion_features, fill_value=0)
             champion_metrics = evaluate_model(champion, X_test_champ, y_test)
+            logger.info(f"   Existing champion loaded from {MODEL_PATH}, holdout metrics: {champion_metrics}")
         except Exception as e:
             logger.warning(f"Could not evaluate current champion: {e}")
+    else:
+        logger.info(f"   No existing champion found at {MODEL_PATH} (or force_retrain=True)")
 
     promote = True
     reason = "no existing champion"
@@ -678,12 +789,12 @@ def train_model_incremental(force_retrain=False):
             reason = f"challenger AUC {chal_auc:.3f} < champion AUC {champ_auc:.3f}, keeping champion"
 
     if promote:
-        joblib.dump(final_model, MODEL_PATH)
-        joblib.dump(X_full.columns.tolist(), FEATURE_PATH)
-        logger.info(f"\n✅ MODEL PROMOTED: {reason}")
+        _dump_and_verify(final_model, MODEL_PATH, "PROMOTED model")
+        _dump_and_verify(X_full.columns.tolist(), FEATURE_PATH, "feature name list")
+        logger.info(f"✅ MODEL PROMOTED: {reason}")
     else:
-        joblib.dump(final_model, CHALLENGER_PATH)
-        logger.info(f"\n⏸️  MODEL NOT PROMOTED (saved as challenger): {reason}")
+        _dump_and_verify(final_model, CHALLENGER_PATH, "challenger model (not promoted)")
+        logger.info(f"⏸️  MODEL NOT PROMOTED (saved as challenger): {reason}")
 
     # Combined feature importance across ensemble members
     current_importance = {}
@@ -762,10 +873,14 @@ def train_model_incremental(force_retrain=False):
         "has_expected_r_model": Path(EXPECTED_R_MODEL_PATH).exists(),
     }
     save_json(METADATA_PATH, metadata)
+    logger.info(f"   💾 Metadata saved → {METADATA_PATH}")
 
     # Self-diagnostics (spec item 17) — runs against full trade history, not
     # just the rolling window, on a ~100-trade cadence.
     maybe_run_diagnostics(full_history_for_diagnostics, current_importance)
+
+    logger.info("🏁 train_model_incremental() finished")
+    logger.info("=" * 60)
 
     return final_model if promote else (champion if champion_metrics else final_model)
 
@@ -774,13 +889,24 @@ def train_model_incremental(force_retrain=False):
 # Inference
 # ---------------------------------------------------------------------------
 
+_model_load_logged = False  # avoid spamming logs on every single inference call
+
+
 def get_xgboost_probability(trade_features, recent_win_rate=0.5):
+    global _model_load_logged
     try:
         if not Path(MODEL_PATH).exists():
+            logger.warning(f"⚠️  No model file found at {MODEL_PATH} — returning neutral 50.0% probability. "
+                            f"Model has not been trained/promoted yet.")
             return 50.0
 
         model = joblib.load(MODEL_PATH)
         feature_names = joblib.load(FEATURE_PATH)
+
+        if not _model_load_logged:
+            logger.info(f"✅ Model loaded successfully from {MODEL_PATH} "
+                        f"({len(feature_names)} features) — AI inference is active")
+            _model_load_logged = True
 
         X = pd.DataFrame([trade_features])
         for col in feature_names:
@@ -800,7 +926,7 @@ def get_xgboost_probability(trade_features, recent_win_rate=0.5):
         return round(calibrated_prob, 1)
 
     except Exception as e:
-        logger.error(f"Prediction failed: {e}")
+        logger.error(f"❌ Prediction failed: {e}")
         return 50.0
 
 
@@ -808,6 +934,7 @@ def get_expected_r(trade_features):
     """Spec item 2 (regression side): expected R-multiple for a candidate trade."""
     try:
         if not Path(EXPECTED_R_MODEL_PATH).exists() or not Path(FEATURE_PATH).exists():
+            logger.debug("Expected-R model or feature list not found yet — skipping expected-R prediction")
             return None
 
         model = joblib.load(EXPECTED_R_MODEL_PATH)
@@ -822,7 +949,7 @@ def get_expected_r(trade_features):
 
         return round(float(model.predict(X)[0]), 3)
     except Exception as e:
-        logger.error(f"Expected-R prediction failed: {e}")
+        logger.error(f"❌ Expected-R prediction failed: {e}")
         return None
 
 
