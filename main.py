@@ -168,12 +168,26 @@ async def scan():
 📦 <b>Quantity:</b> {trade['qty']:.4f}
 🔥 <b>Confidence:</b> {trade['confidence']}%
 """)
-            # Retrain model periodically
-            if len(get_trade_history()) >= 10:
-                train_model_incremental()
 
         except Exception as e:
             logger.exception(f"SCAN FAILED: {e}")
+
+        # Retrain model periodically. This is now OUTSIDE the scan try/except
+        # above and has its own handler, on purpose: it used to be the last
+        # line inside that block, so any earlier failure in the scan cycle
+        # (signal execution, add_trade, send_alert's Telegram call, etc.)
+        # would jump straight to "SCAN FAILED" and skip training entirely,
+        # with zero training-specific log output. Training should not depend
+        # on the rest of the scan succeeding.
+        try:
+            trade_count = len(get_trade_history())
+            if trade_count >= 10:
+                logger.info(f"🧠 Triggering train_model_incremental() (trade_count={trade_count})")
+                train_model_incremental()
+            else:
+                logger.info(f"🧠 Skipping retrain, not enough trades yet ({trade_count}/10)")
+        except Exception as e:
+            logger.exception(f"MODEL RETRAIN FAILED: {e}")
 
 
 # ==================== SCHEDULER WRAPPERS ====================
