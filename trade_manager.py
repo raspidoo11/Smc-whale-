@@ -61,7 +61,19 @@ def add_trade(trade):
     save_open_trades(trades)
     logger.info(f"Trade added: {trade['symbol']}")
 
-def close_trade(symbol, exit_price, result):
+def close_trade(symbol, exit_price, result, extra_fields=None):
+    """
+    extra_fields: optional dict merged into the trade BEFORE it's written to
+    trade_history.json (e.g. {"pnl": ..., "entry_fee": ..., "exit_fee": ...}).
+
+    Previously, callers (paper_trader.py) mutated the dict this function
+    *returned*, AFTER save_trade_history() had already run. Since
+    get_trade_history() always does a fresh load_json() from disk (there's
+    no in-memory cache), those late mutations never made it back to disk --
+    pnl was permanently None in trade_history.json even though it was
+    correctly calculated in memory. Passing extra_fields in means pnl/fees
+    are on the dict before it's ever saved.
+    """
     trades = get_open_trades()
     history = get_trade_history()
     remaining = []
@@ -71,6 +83,8 @@ def close_trade(symbol, exit_price, result):
         if trade.get("symbol") == symbol and trade.get("status") == "OPEN" and closed_trade is None:
             trade["status"] = result
             trade["exit_price"] = float(exit_price)
+            if extra_fields:
+                trade.update(extra_fields)
             closed_trade = trade
         else:
             remaining.append(trade)
@@ -78,9 +92,12 @@ def close_trade(symbol, exit_price, result):
     if closed_trade:
         history.append(closed_trade)
         save_trade_history(history)
-        logger.info(f"Trade closed: {symbol} ({result})")   # ← Fixed here
+        logger.info(f"Trade closed: {symbol} ({result})")
 
-        if result == "SL":
+        # NOTE: this used to check `result == "SL"`, but result is always
+        # "WIN" or "LOSS" (see paper_trader.py's close_paper_trade_with_fees),
+        # so that cooldown never actually fired. Fixed to match real values.
+        if result == "LOSS":
             set_cooldown(symbol, minutes=60)
 
     save_open_trades(remaining)
