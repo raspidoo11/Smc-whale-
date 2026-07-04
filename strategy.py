@@ -471,8 +471,8 @@ def get_signal(symbol, df_15m, df_5m):
             # AI Mode
             # Let the model have slightly more influence
             final_confidence = int(
-                (score * 0.45) +
-                (ai_prob * 0.55)
+                (score * 0.60) +
+                (ai_prob * 0.40)
             )
 
             confidence_required = 55
