@@ -3,16 +3,25 @@ import asyncio
 from datetime import datetime, timezone
 from trade_manager import get_open_trades, save_open_trades, get_balance
 from exchange import get_exchange
-from bybit_executor import activate_trailing_stop, get_open_position_size, get_last_closed_pnl
+from bybit_executor import (
+    EXECUTE_TRADES,
+    activate_trailing_stop,
+    get_open_position_size,
+    get_last_closed_pnl,
+)
 from telegram_alerts import send_alert
-from xgboost_trainer import train_model_incremental
+from alerts import format_close_alert, format_trailing_alert
 
 logger = logging.getLogger(__name__)
 exchange = get_exchange()
 
-# How long to wait before retrying a failed trailing-stop activation, and how
-# many attempts to allow before giving up and force-closing the trade so it
-# can't get stuck open (and missing from training data) forever.
+# Trailing-stop trail distance (percent). Used for both the live Bybit trailing
+# stop and the paper-mode simulation.
+TRAIL_PERCENT = 0.5
+
+# Live-only: how long to wait before retrying a failed trailing-stop
+# activation, and how many attempts before force-closing so a trade can't get
+# stuck open (and missing from training data) forever.
 RETRY_COOLDOWN_MINUTES = 1
 MAX_ACTIVATION_ATTEMPTS = 2
 
@@ -41,23 +50,50 @@ def _minutes_since(iso_timestamp):
 
 
 async def _close_trade_record(trade, exit_price, exit_reason):
-    """Shared close path so trailing-stop closes get recorded the same way
-    SL closes always have: same balance update, same trade_history write,
-    same training trigger. Relies on close_paper_trade_with_fees internally
-    calling trade_manager.close_trade(), same as the original SL branch did."""
+    """Shared close path so trailing-stop closes get recorded exactly like SL
+    closes: same balance update, same trade_history write, same alert style.
+    Relies on close_paper_trade_with_fees internally calling
+    trade_manager.close_trade()."""
     from paper_trader import close_paper_trade_with_fees
     pnl_after_fees = close_paper_trade_with_fees(trade, exit_price, exit_reason)
 
     balance = get_balance()["balance"]
-    await send_alert(
-        f"✅ {exit_reason}\n"
-        f"{trade.get('direction')} {trade.get('symbol')}\n"
-        f"Entry: ${float(trade.get('entry', 0)):.6f} → Exit: ${exit_price:.6f}\n"
-        f"Qty: {trade.get('qty')}\n"
-        f"Net PnL: ${pnl_after_fees:.2f}\n"
-        f"Balance: ${balance:.2f}"
-    )
-    train_model_incremental()
+    await send_alert(format_close_alert(trade, exit_price, exit_reason, pnl_after_fees, balance))
+    # Retraining is intentionally NOT triggered here — it runs on its own
+    # 10-minute schedule in main.py, decoupled from the monitor hot path.
+
+
+async def _handle_paper_trailing(trade, symbol, direction, current_price, open_trades):
+    """Simulate a ratcheting trailing stop for paper trades.
+
+    Previously paper mode had no real trailing stop at all: activate_trailing_
+    stop() short-circuits to None when EXECUTE_TRADES=false, so the monitor
+    logged two 'activation failed' errors and force-closed the trade at market
+    with the ugly reason 'Trailing Stop Failed - Forced Close'. Now the trail
+    anchor ratchets with favorable price and the trade closes when price
+    retraces TRAIL_PERCENT from the best level — the same behavior the live
+    Bybit trailing stop provides. Returns True if the trade was closed."""
+    trail = float(trade.get("trail_percent", TRAIL_PERCENT))
+    anchor = float(trade.get("trail_anchor", current_price))
+
+    if direction == "LONG":
+        anchor = max(anchor, current_price)
+        stop_price = anchor * (1 - trail / 100)
+        breached = current_price <= stop_price
+    else:
+        anchor = min(anchor, current_price)
+        stop_price = anchor * (1 + trail / 100)
+        breached = current_price >= stop_price
+
+    if breached:
+        logger.info(f"✅ {symbol} paper trailing stop hit at ~{stop_price:.6f}")
+        open_trades.remove(trade)
+        await _close_trade_record(trade, stop_price, "Trailing Stop Hit")
+        return True
+
+    # Ratchet the anchor forward; caller persists via trades_changed.
+    trade["trail_anchor"] = anchor
+    return False
 
 
 async def monitor_trades():
@@ -70,9 +106,7 @@ async def monitor_trades():
 
         trades_changed = False
 
-        # Iterate over a copy -- we may remove closed trades from
-        # `open_trades` as we go, and mutating a list while iterating it
-        # directly silently skips entries.
+        # Iterate over a copy -- we may remove closed trades as we go.
         for trade in open_trades[:]:
             try:
                 symbol = trade.get("symbol")
@@ -96,16 +130,21 @@ async def monitor_trades():
                     f"{symbol} | Current={current_price:.6f} | TP={tp:.6f} | SL={sl:.6f}"
                 )
 
-                # ---- Trailing stop already active: watch for real closure ----
-                # This is the fix for the infinite-retry bug: once activated,
-                # we stop calling activate_trailing_stop() entirely and just
-                # poll whether Bybit has actually closed the position yet.
+                # ============================================================
+                # Trailing stop already active
+                # ============================================================
                 if trade.get("trailing_stop_active"):
+                    if not EXECUTE_TRADES:
+                        closed = await _handle_paper_trailing(
+                            trade, symbol, direction, current_price, open_trades
+                        )
+                        trades_changed = True
+                        continue
+
+                    # ---- Live: poll whether Bybit has closed the position ----
                     live_size = get_open_position_size(symbol)
-
                     if live_size is None:
-                        continue  # couldn't verify, try again next cycle
-
+                        continue  # couldn't verify, retry next cycle
                     if live_size == 0:
                         closed_info = get_last_closed_pnl(symbol)
                         if closed_info and closed_info.get("exit_price"):
@@ -114,16 +153,15 @@ async def monitor_trades():
                         else:
                             exit_price = current_price
                             exit_reason = "Trailing Stop Hit (approx exit price)"
-
                         logger.info(f"✅ {symbol} closed via trailing stop at ~${exit_price:.6f}")
                         open_trades.remove(trade)
                         trades_changed = True
                         await _close_trade_record(trade, exit_price, exit_reason)
-                        continue
-
-                    # Still running with the trailing stop live -- nothing to do.
                     continue
 
+                # ============================================================
+                # TP / SL evaluation
+                # ============================================================
                 if direction == "LONG":
                     hit_tp = current_price >= tp
                     hit_sl = current_price <= sl
@@ -135,24 +173,32 @@ async def monitor_trades():
 
                 if hit_sl:
                     exit_price = sl
-                    exit_reason = "Stop Loss Hit"
-                    logger.info(f"🚨 {exit_reason} on {symbol} at ${exit_price:.6f}")
+                    logger.info(f"🚨 Stop Loss Hit on {symbol} at ${exit_price:.6f}")
                     open_trades.remove(trade)
                     trades_changed = True
-                    await _close_trade_record(trade, exit_price, exit_reason)
+                    await _close_trade_record(trade, exit_price, "Stop Loss Hit")
                     continue
 
                 if hit_tp:
+                    # ---- Paper: arm the simulated trailing stop ----
+                    if not EXECUTE_TRADES:
+                        trade["trailing_stop_active"] = True
+                        trade["trail_anchor"] = current_price
+                        trade["trail_percent"] = TRAIL_PERCENT
+                        trade["trailing_stop_activated_at"] = datetime.now(timezone.utc).isoformat()
+                        trades_changed = True
+                        logger.info(f"🚀 {symbol} TP reached — arming paper trailing stop")
+                        await send_alert(format_trailing_alert(trade, current_price, TRAIL_PERCENT))
+                        continue
+
+                    # ---- Live: activate the Bybit trailing stop (with retry) ----
                     attempts = trade.get("trailing_stop_attempts", 0)
                     minutes_since_last = _minutes_since(trade.get("trailing_stop_last_attempt"))
 
                     if minutes_since_last is not None and minutes_since_last < RETRY_COOLDOWN_MINUTES:
-                        continue  # tried recently, don't hammer the exchange every 35s
+                        continue
 
                     if attempts >= MAX_ACTIVATION_ATTEMPTS:
-                        # Trailing stop keeps failing -- force a close so the
-                        # trade can't sit stuck forever and vanish from
-                        # training data.
                         logger.warning(
                             f"{symbol}: trailing stop failed {attempts}x, forcing close at market"
                         )
@@ -168,7 +214,7 @@ async def monitor_trades():
                         symbol=symbol,
                         direction=direction,
                         qty=qty,
-                        trail_percent=0.5
+                        trail_percent=TRAIL_PERCENT,
                     )
 
                     trade["trailing_stop_attempts"] = attempts + 1
@@ -178,19 +224,12 @@ async def monitor_trades():
                     if result:
                         trade["trailing_stop_active"] = True
                         trade["trailing_stop_activated_at"] = datetime.now(timezone.utc).isoformat()
-                        await send_alert(
-                            f"🚀 Trailing Stop Activated\n"
-                            f"{direction} {symbol}\n"
-                            f"Original TP: ${tp:.6f}\n"
-                            f"Current Price: ${current_price:.6f}\n"
-                            f"Trail: 0.5%"
-                        )
+                        await send_alert(format_trailing_alert(trade, current_price, TRAIL_PERCENT))
                     else:
                         logger.error(
                             f"Failed to activate trailing stop for {symbol} "
                             f"(attempt {attempts + 1}/{MAX_ACTIVATION_ATTEMPTS})"
                         )
-
                     continue
 
             except Exception as e:

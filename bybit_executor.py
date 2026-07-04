@@ -1,9 +1,9 @@
 import logging
 import os
 import time
-from exchange import get_trade_client
+from exchange import get_trade_client, get_exchange
 from trade_manager import get_risk_amount
-from xgboost_trainer import get_ai_risk_percent, detect_market_regime
+from xgboost_trainer import get_ai_risk_percent
 
 logger = logging.getLogger(__name__)
 
@@ -13,14 +13,42 @@ logger = logging.getLogger(__name__)
 # EXECUTE_TRADES = false, not a typo'd name.
 EXECUTE_TRADES = os.getenv("EXECUTE_TRADES", "true").lower() == "true"
 
+CATEGORY = "linear"
+
+
+def _pybit_symbol(symbol):
+    """Normalize any symbol form to Bybit's ('BTCUSDT').
+    Accepts ccxt unified ('BTC/USDT:USDT') or already-clean ('BTCUSDT')."""
+    return symbol.split(":")[0].replace("/", "").replace("-", "").upper()
+
 
 def get_symbol_info(symbol):
-    client = get_trade_client()
+    """Return the ccxt market dict (precision + limits) for a symbol.
+
+    FIX: this previously called `get_trade_client().load_markets()`, but the
+    trade client is a *pybit* HTTP session, which has no `load_markets()` (that
+    is a ccxt method). It raised AttributeError on every call, so quantity
+    could never be computed and every live/demo order was skipped. Market
+    metadata now comes from the ccxt *public* exchange, which is the correct
+    source for precision/limits and is already loaded elsewhere.
+    """
+    ex = get_exchange()
     try:
-        markets = client.load_markets()
-        clean_symbol = symbol.replace("/", "").upper()
-        if clean_symbol in markets:
-            return markets[clean_symbol]
+        if symbol in ex.markets:
+            return ex.markets[symbol]
+
+        # symbol may be pybit-style 'BTCUSDT' -> look up by exchange market id.
+        pid = _pybit_symbol(symbol)
+        candidates = ex.markets_by_id.get(pid) or ex.markets_by_id.get(symbol)
+        if candidates:
+            if isinstance(candidates, list):
+                for m in candidates:
+                    if m.get("swap") and m.get("linear"):
+                        return m
+                return candidates[0]
+            return candidates
+
+        logger.error(f"No ccxt market found for {symbol} (id={pid})")
         return None
     except Exception as e:
         logger.error(f"Failed to load market info for {symbol}: {e}")
@@ -71,18 +99,30 @@ def calculate_proper_qty(symbol, entry_price, sl_price, ai_prob=50, regime="rang
 
 
 def set_leverage_if_needed(symbol, desired_leverage=10):
-    client = get_trade_client()
-    try:
-        positions = client.fetch_positions([symbol])
-        current_lev = int(positions[0].get("leverage", 0)) if positions else 0
+    """Set leverage via the pybit API.
 
-        if current_lev != desired_leverage:
-            logger.info(f"Setting leverage to {desired_leverage}x for {symbol}")
-            client.set_leverage(desired_leverage, symbol, params={"category": "linear"})
-            time.sleep(0.5)
+    FIX: previously used ccxt-style calls (`client.fetch_positions([...])` and
+    `client.set_leverage(lev, symbol, params=...)`) on the pybit client, which
+    doesn't have those. Now uses pybit's `set_leverage(category, symbol,
+    buyLeverage, sellLeverage)` and treats Bybit's "leverage not modified"
+    (retCode 110043) as success rather than a failure that aborts the order.
+    """
+    client = get_trade_client()
+    sym = _pybit_symbol(symbol)
+    try:
+        client.set_leverage(
+            category=CATEGORY,
+            symbol=sym,
+            buyLeverage=str(desired_leverage),
+            sellLeverage=str(desired_leverage),
+        )
+        time.sleep(0.3)
         return True
     except Exception as e:
-        logger.error(f"Leverage setting failed for {symbol}: {e}")
+        # 110043 = leverage not modified (already at desired value) -> fine.
+        if "110043" in str(e) or "not modified" in str(e).lower():
+            return True
+        logger.error(f"Leverage setting failed for {sym}: {e}")
         return False
 
 
@@ -156,17 +196,23 @@ async def execute_trade(signal):
 def get_open_position_size(symbol):
     """Ask the exchange directly whether this position is still open, and if
     so, how large. Local trade records can go stale if Bybit auto-closes a
-    position via its own SL/TP before our monitor loop notices."""
+    position via its own SL/TP before our monitor loop notices.
+
+    FIX: used ccxt `fetch_positions` on the pybit client (doesn't exist). Now
+    uses pybit `get_positions(category, symbol)`.
+    """
     client = get_trade_client()
+    sym = _pybit_symbol(symbol)
     try:
-        positions = client.fetch_positions([symbol])
-        for pos in positions:
-            size = float(pos.get("contracts") or pos.get("size") or 0)
+        resp = client.get_positions(category=CATEGORY, symbol=sym)
+        rows = resp.get("result", {}).get("list", [])
+        for pos in rows:
+            size = float(pos.get("size") or 0)
             if size > 0:
                 return size
         return 0.0
     except Exception as e:
-        logger.error(f"Failed to fetch live position size for {symbol}: {e}")
+        logger.error(f"Failed to fetch live position size for {sym}: {e}")
         return None  # None = "couldn't check", distinct from 0 = "confirmed closed"
 
 
@@ -194,6 +240,39 @@ def get_last_closed_pnl(symbol):
         }
     except Exception as e:
         logger.debug(f"Could not fetch closed PnL for {symbol}: {e}")
+        return None
+
+
+def get_all_open_positions():
+    """Return {pybit_symbol: size} for every currently-open linear position, or
+    None if the exchange couldn't be reached. Used by reconcile.py as the
+    source of truth for what is actually open."""
+    client = get_trade_client()
+    try:
+        resp = client.get_positions(category=CATEGORY, settleCoin="USDT")
+        rows = resp.get("result", {}).get("list", [])
+        return {
+            r["symbol"]: float(r.get("size") or 0)
+            for r in rows
+            if float(r.get("size") or 0) > 0
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch open positions: {e}")
+        return None
+
+
+def get_wallet_balance_usdt():
+    """Real account equity (USDT) from the unified wallet, or None on failure."""
+    client = get_trade_client()
+    try:
+        resp = client.get_wallet_balance(accountType="UNIFIED")
+        rows = resp.get("result", {}).get("list", [])
+        if not rows:
+            return None
+        total = rows[0].get("totalEquity") or rows[0].get("totalWalletBalance")
+        return float(total) if total not in (None, "") else None
+    except Exception as e:
+        logger.error(f"Failed to fetch wallet balance: {e}")
         return None
 
 

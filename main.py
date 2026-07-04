@@ -24,6 +24,10 @@ from trade_monitor import monitor_trades
 from xgboost_trainer import train_model_incremental
 from trade_manager import get_trade_history
 from bybit_executor import EXECUTE_TRADES
+from config import MAX_OPEN_TRADES
+from alerts import format_open_alert
+from risk_manager import can_open_trade
+from reconcile import reconcile
 
 logging.basicConfig(
     level=logging.INFO,
@@ -37,7 +41,7 @@ else:
     exchange = None
 
 # ==================== CONFIG ====================
-MAX_OPEN_TRADES = 10
+# MAX_OPEN_TRADES now comes from config.py (single source of truth).
 SCAN_LOCK = asyncio.Lock()           # Prevents overlapping scans
 
 
@@ -88,7 +92,6 @@ async def scan():
 
                     if signal:
                         logger.info(f"✅ Signal Found | {symbol} | {signal['direction']} | Confidence={signal['confidence']}")
-                        logger.info(f"✅ Signal Found | {symbol} | {signal['direction']} | Confidence={signal['confidence']}")
                         # Check for duplicate using signal_hash
                         if get_signal_hash_exists(signal.get("signal_hash")):
                             logger.info(f"⏭️ Duplicate signal_hash skipped: {symbol}")
@@ -136,6 +139,14 @@ async def scan():
                     "trade_no": trade_no,
                 }
 
+                # Portfolio-level risk gate: even if we're under MAX_OPEN_TRADES,
+                # reject setups that would over-concentrate direction/alts or
+                # push total open risk past the configured heat cap.
+                allowed, reason = can_open_trade(trade_data, get_open_trades(), balance)
+                if not allowed:
+                    logger.info(f"🚦 Skipping {trade['symbol']}: {reason}")
+                    continue
+
                 if EXECUTE_TRADES:
                     order = await execute_trade(trade_data)
 
@@ -153,21 +164,7 @@ async def scan():
                 if trade.get("signal_hash"):
                     save_signal_hash(trade["signal_hash"])
 
-                await send_alert(f"""
-🚨 <b>SMC WHALE SIGNAL #{trade_no}</b>
-
-🪙 <b>Pair:</b> {trade['symbol']}
-📈 <b>Direction:</b> {'🟢 LONG' if trade['direction']=='LONG' else '🔴 SHORT'}
-
-💰 <b>Entry:</b> <code>{trade['entry']:.6f}</code>
-
-🛑 <b>Stop Loss:</b> <code>{trade['sl']:.6f}</code>
-
-🎯 <b>Take Profit:</b> <code>{trade['tp']:.6f}</code>
-
-📦 <b>Quantity:</b> {trade['qty']:.4f}
-🔥 <b>Confidence:</b> {trade['confidence']}%
-""")
+                await send_alert(format_open_alert(trade_data))
 
         except Exception as e:
             logger.exception(f"SCAN FAILED: {e}")
@@ -228,6 +225,15 @@ def run_monitor_sync():
         logger.exception(f"Monitor wrapper error: {e}")
 
 
+def run_reconcile_sync():
+    """Live/demo only: sync local open trades + balance with the exchange.
+    No-op in paper mode (reconcile() checks EXECUTE_TRADES internally)."""
+    try:
+        asyncio.run(reconcile())
+    except Exception as e:
+        logger.exception(f"Reconcile wrapper error: {e}")
+
+
 def heartbeat():
     logger.info("💚 Worker alive")
 
@@ -256,6 +262,7 @@ def main():
     schedule.every(35).seconds.do(run_monitor_sync)
     schedule.every(5).minutes.do(run_scan_sync)
     schedule.every(10).minutes.do(retrain_model)
+    schedule.every(2).minutes.do(run_reconcile_sync)
     schedule.every().day.at("00:00").do(daily_reset)
 
     logger.info("✅ Scheduler started")

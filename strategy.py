@@ -1,16 +1,28 @@
 import pandas as pd
+import numpy as np
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from trade_manager import get_trade_history
 from xgboost_trainer import (
     calculate_historical_context,
     get_xgboost_probability,
+    get_expected_r,
+    get_dynamic_confidence_threshold,
+    detect_market_regime,
+    calculate_atr_percentile,
+    extract_pro_features_from_trade,
 )
+from config import MIN_EXPECTED_R
 
 logger = logging.getLogger(__name__)
 
 USE_XGBOOST = os.getenv("USE_XGBOOST", "false").lower() == "true"
+
+# Time source seam. Live trading uses wall-clock UTC; the backtester overrides
+# this to the candle's timestamp so session/hour features reflect the bar being
+# replayed, not "now". Keeps a single get_signal() for both paths.
+NOW_FN = lambda: datetime.now(timezone.utc)
 
 # Module-level set to track recent signals for cooldown (prevents duplicate alerts on same candle)
 # For multi-pair scanners, manage recent_signals per symbol (e.g. dict of sets) or include symbol in signal_hash
@@ -34,6 +46,15 @@ def calculate_features(df):
     df["volume_ma"] = (
         df["volume"]
     ).rolling(20).mean()
+
+    # Trend references (used for distance-to-mean features). Computed here so
+    # both live inference and stored-trade featurization see identical values.
+    df["ema20"] = df["close"].ewm(span=20, adjust=False).mean()
+    df["ema50"] = df["close"].ewm(span=50, adjust=False).mean()
+
+    typical = (df["high"] + df["low"] + df["close"]) / 3
+    cum_vol = df["volume"].cumsum().replace(0, np.nan)
+    df["vwap"] = (typical * df["volume"]).cumsum() / cum_vol
 
     # ------------------------------------
     # Adaptive Volume Multiplier (improved)
@@ -221,7 +242,11 @@ def get_signal(symbol, df_15m, df_5m):
 
         entry = float(latest["close"])
 
-        now = datetime.now()
+        # UTC, not local time. Candle timestamps and the session buckets
+        # (London/NY/Asian) are all defined in UTC; datetime.now() (naive
+        # local) would mislabel every session feature on any non-UTC host.
+        # NOW_FN is overridable so the backtester can replay historical bars.
+        now = NOW_FN()
 
         hour = now.hour
 
@@ -243,6 +268,29 @@ def get_signal(symbol, df_15m, df_5m):
                 "current_dd_pct": 0,
             }
         )
+
+        # ==========================================================
+        # Contextual raw features (regime / volatility / distances)
+        # ----------------------------------------------------------
+        # Computed once here and stored on the returned signal so that
+        # TRAINING (extract_pro_features_from_trade reading the persisted
+        # trade) and INFERENCE (below) derive identical feature vectors.
+        # Previously none of these were persisted, so the trainer read the
+        # defaults every time and these features were dead constants.
+        # ==========================================================
+
+        market_regime = detect_market_regime(df_5m)
+        atr_percentile = calculate_atr_percentile(df_5m["atr"].dropna(), atr)
+
+        def _rel(a, b):
+            b = float(b) if pd.notna(b) else entry
+            return float((a - b) / b) if b else 0.0
+
+        distance_to_ema20 = _rel(entry, latest.get("ema20", entry))
+        distance_to_ema50 = _rel(entry, latest.get("ema50", entry))
+        distance_to_vwap = _rel(entry, latest.get("vwap", entry))
+        distance_to_prev_high = _rel(swing_high, entry)
+        distance_to_prev_low = _rel(swing_low, entry)
 
         # ==========================================================
         # Dynamic Stop Loss / Take Profit
@@ -332,135 +380,65 @@ def get_signal(symbol, df_15m, df_5m):
             max(abs(entry - sl), 0.0001)
         )
 
-        ai_prob = 50.0
+        # ==========================================================
+        # Signal snapshot — the single canonical record of everything this
+        # setup looked like at entry. It is (a) fed to the SAME featurizer the
+        # trainer uses, and (b) persisted verbatim on the returned signal, so
+        # training and inference can never drift apart.
+        # ==========================================================
+
+        direction = "LONG" if trend_bull else "SHORT"
+
+        signal_snapshot = {
+            "symbol": symbol,
+            "direction": direction,
+            "entry": entry,
+            "sl": float(sl),
+            "tp": float(tp),
+            "volume_spike": int(latest["volume_spike"]),
+            "displacement": int(latest["displacement"]),
+            "sweep": int(bull_sweep if trend_bull else bear_sweep),
+            "fvg": int(bull_fvg if trend_bull else bear_fvg),
+            "atr": float(atr),
+            "body": float(latest["body"]) if pd.notna(latest["body"]) else 0.0,
+            "volume": float(latest["volume"]) if pd.notna(latest["volume"]) else 0.0,
+            "volume_ma": float(latest["volume_ma"]) if pd.notna(latest["volume_ma"]) else 0.0,
+            "hour": hour,
+            "day_of_week": day_of_week,
+            "market_regime": market_regime,
+            "atr_percentile": float(atr_percentile),
+            "distance_to_ema20": distance_to_ema20,
+            "distance_to_ema50": distance_to_ema50,
+            "distance_to_vwap": distance_to_vwap,
+            "distance_to_prev_high": distance_to_prev_high,
+            "distance_to_prev_low": distance_to_prev_low,
+            "risk_reward": risk_reward,
+        }
 
         # ==========================================================
-        # XGBoost Prediction
+        # AI Probability
+        # ----------------------------------------------------------
+        # Uses extract_pro_features_from_trade — the EXACT same function the
+        # trainer uses to build its training matrix. Previously inference
+        # hand-built a smaller, differently-named dict and get_xgboost_
+        # probability filled every unrecognized feature with 0, so the model
+        # was scored on a feature vector it never saw in training (train/serve
+        # skew). Same function in both paths guarantees parity by construction.
         # ==========================================================
+
+        ai_prob = 50.0
+        expected_r = None
 
         if USE_XGBOOST:
-
-            trade_features = {
-
-                "volume_spike": latest["volume_spike"],
-
-                "displacement": latest["displacement"],
-
-                "trend_bull": int(trend_bull),
-
-                "sweep": int(
-                    bull_sweep or bear_sweep
-                ),
-
-                "fvg": int(
-                    bull_fvg or bear_fvg
-                ),
-
-                "atr": float(atr),
-
-                "risk_reward": risk_reward,
-
-                "hour": hour,
-
-                "day_of_week": day_of_week,
-
-                "body_ratio":
-                    latest["body"] /
-                    max(atr, 0.0001),
-
-                "volume_strength":
-                    latest["volume"] /
-                    max(latest["volume_ma"], 0.0001),
-
-                "atr_expansion": float(atr),
-
-                "confluence_count": sum([
-                    latest["volume_spike"],
-                    latest["displacement"],
-                    bull_sweep or bear_sweep,
-                    bull_fvg or bear_fvg
-                ]),
-
-                "is_london_open":
-                    1 if 7 <= hour <= 11 else 0,
-
-                "is_ny_open":
-                    1 if 12 <= hour <= 16 else 0,
-
-                "is_asian":
-                    1 if (hour >= 22 or hour <= 6) else 0,
-
-                "is_overlap":
-                    1 if 12 <= hour <= 15 else 0,
-
-                "is_quiet_time":
-                    1 if 17 <= hour <= 21 else 0,
-
-                "is_monday":
-                    1 if day_of_week == 0 else 0,
-
-                "is_friday":
-                    1 if day_of_week == 4 else 0,
-
-                "risk_pct": risk_pct,
-
-                "reward_pct": reward_pct,
-
-                "adversity_ratio": adversity_ratio,
-
-                "recent_win_rate":
-                    context.get(
-                        "recent_win_rate",
-                        0.5
-                    ),
-
-                "streak_count":
-                    context.get(
-                        "streak_count",
-                        0
-                    ),
-
-                "is_hot_streak":
-                    1 if context.get(
-                        "streak_count",
-                        0
-                    ) > 0 else 0,
-
-                "cumulative_pnl":
-                    context.get(
-                        "cumulative_pnl",
-                        0
-                    ),
-
-                "current_dd_pct":
-                    context.get(
-                        "current_dd_pct",
-                        0
-                    ),
-
-                "volume_x_displacement":
-
-                    latest["volume_spike"]
-                    *
-                    latest["displacement"],
-
-                "sweep_x_fvg":
-
-                    int(bull_sweep or bear_sweep)
-                    *
-                    int(bull_fvg or bear_fvg),
-
-                "volatility_x_risk":
-
-                    float(atr)
-                    *
-                    risk_pct,
-
-            }
-
-            ai_prob = get_xgboost_probability(
-                trade_features
+            features = extract_pro_features_from_trade(
+                signal_snapshot, context, regime=market_regime
             )
+            ai_prob = get_xgboost_probability(features)
+            # Auxiliary regression: how many R the model expects this setup to
+            # realize. Used as an entry filter below. None until the model has
+            # enough data to train.
+            expected_r = get_expected_r(features)
+            signal_snapshot["expected_r"] = expected_r
 
         # ==========================================================
         # Confidence Engine
@@ -468,14 +446,20 @@ def get_signal(symbol, df_15m, df_5m):
 
         if USE_XGBOOST:
 
-            # AI Mode
-            # Let the model have slightly more influence
+            # AI Mode: blend SMC score with the model probability, and require a
+            # confidence that adapts to market conditions (looser in clean
+            # trends, stricter in chop/high-vol and after a losing run) instead
+            # of a hardcoded constant.
             final_confidence = int(
                 (score * 0.60) +
                 (ai_prob * 0.40)
             )
 
-            confidence_required = 55
+            confidence_required = get_dynamic_confidence_threshold(
+                regime=market_regime,
+                atr_percentile=atr_percentile,
+                recent_win_rate=context.get("recent_win_rate", 0.5),
+            )
 
         else:
 
@@ -537,118 +521,47 @@ Required          : {confidence_required}
         candle_time = (
             df_5m.index[-1]
             if hasattr(df_5m.index, "__len__")
-            else datetime.now()
+            else datetime.now(timezone.utc)
         )
 
-        signal_hash = (
-            f"{candle_time}_"
-            f"{'LONG' if trend_bull else 'SHORT'}"
-        )
+        # Symbol is part of the hash now. Without it, two different pairs that
+        # print the same direction on the same candle timestamp collide, and
+        # the second one is silently dropped as a "duplicate" — suppressing
+        # real signals across the whole scan set.
+        signal_hash = f"{symbol}_{candle_time}_{direction}"
 
-        # Cooldown: prevent duplicate signals on the same candle (for this pair/context)
+        # Cooldown: prevent duplicate signals on the same candle for this pair.
         if signal_hash in recent_signals:
             return None
 
         # ==========================================================
-        # LONG SIGNAL
+        # SIGNAL — direction already encoded in signal_snapshot, so a single
+        # return covers both LONG and SHORT (exactly one of trend_bull /
+        # trend_bear is True to reach here; the SL/TP block returns None
+        # otherwise).
         # ==========================================================
 
-        if trend_bull and final_confidence >= confidence_required:
+        # Expected-R filter (AI mode only): once the regression model exists,
+        # reject setups it expects to realize less than MIN_EXPECTED_R, even if
+        # the win probability clears the confidence bar — a low win rate on
+        # good R can be fine, but a decent win rate on poor R is not. Skipped
+        # (expected_r is None) until the model has trained.
+        if USE_XGBOOST and expected_r is not None and expected_r < MIN_EXPECTED_R:
+            logger.info(
+                f"↩️ {symbol}: expected R {expected_r:.2f} < {MIN_EXPECTED_R} — skipping"
+            )
+            return None
+
+        if final_confidence >= confidence_required:
 
             recent_signals.add(signal_hash)
             return {
-
-                "direction": "LONG",
-
+                **signal_snapshot,
                 "confidence": final_confidence,
-
-                "entry": entry,
-
-                "sl": float(sl),
-
-                "tp": float(tp),
-
                 "ai_prob": ai_prob,
-
                 "signal_hash": signal_hash,
-
-                "volume_spike": int(latest["volume_spike"]),
-
-                "displacement": int(latest["displacement"]),
-
-                "sweep": int(bull_sweep),
-
-                "fvg": int(bull_fvg),
-
-                "atr": float(atr),
-
-                "risk_reward": risk_reward,
-
-                "hour": hour,
-
-                "day_of_week": day_of_week,
-
-                "recent_win_rate": context.get(
-                    "recent_win_rate",
-                    0.5
-                ),
-
-                "streak_count": context.get(
-                    "streak_count",
-                    0
-                ),
-
-            }
-
-        # ==========================================================
-        # SHORT SIGNAL
-        # ==========================================================
-
-        if trend_bear and final_confidence >= confidence_required:
-
-            recent_signals.add(signal_hash)
-            return {
-
-                "direction": "SHORT",
-
-                "confidence": final_confidence,
-
-                "entry": entry,
-
-                "sl": float(sl),
-
-                "tp": float(tp),
-
-                "ai_prob": ai_prob,
-
-                "signal_hash": signal_hash,
-
-                "volume_spike": int(latest["volume_spike"]),
-
-                "displacement": int(latest["displacement"]),
-
-                "sweep": int(bear_sweep),
-
-                "fvg": int(bear_fvg),
-
-                "atr": float(atr),
-
-                "risk_reward": risk_reward,
-
-                "hour": hour,
-
-                "day_of_week": day_of_week,
-
-                "recent_win_rate": context.get(
-                    "recent_win_rate",
-                    0.5
-                ),
-
-                "streak_count": context.get(
-                    "streak_count",
-                    0
-                ),
-
+                "recent_win_rate": context.get("recent_win_rate", 0.5),
+                "streak_count": context.get("streak_count", 0),
             }
 
         return None

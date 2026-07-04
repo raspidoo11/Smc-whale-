@@ -1,0 +1,489 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © graphicsperry01
+
+//@version=6
+indicator("SMC Whale AI", overlay = true, max_labels_count = 500, max_boxes_count = 500, max_lines_count = 500)
+
+//====================================================
+// PART 1 -- INPUTS
+//====================================================
+
+// Trading-mode presets — mirrors the Python config's SCALP/SWING timeframe
+// pairs and adds a Day-trade preset in between. Switch this to change both
+// timeframes at once; "Custom" falls back to the two manual fields below.
+//   Scalp : 15m trend / 5m entry
+//   Day   : 1H  trend / 15m entry
+//   Swing : 4H  trend / 30m entry
+tradeMode = input.string("Scalp", "Trading Mode", options = ["Scalp", "Day", "Swing", "Custom"], group = "Timeframes",
+     tooltip = "Scalp = 15m/5m · Day = 1H/15m · Swing = 4H/30m · Custom = use the two fields below")
+
+customTrendTF = input.timeframe("15", "Custom Trend TF", group = "Timeframes")
+customEntryTF = input.timeframe("5", "Custom Entry TF", group = "Timeframes")
+
+trendTF = tradeMode == "Scalp" ? "15" : tradeMode == "Day" ? "60" : tradeMode == "Swing" ? "240" : customTrendTF
+entryTF = tradeMode == "Scalp" ? "5"  : tradeMode == "Day" ? "15" : tradeMode == "Swing" ? "30"  : customEntryTF
+
+showDashboard = input.bool(true, "Dashboard", group = "Display")
+showSignals   = input.bool(true, "Signals", group = "Display")
+showBOS       = input.bool(true, "Break of Structure", group = "Display")
+showFVG       = input.bool(true, "Fair Value Gaps", group = "Display")
+showLiquidity = input.bool(true, "Liquidity Sweeps", group = "Display")
+showLevels    = input.bool(true, "Entry / SL / TP", group = "Display")
+showOB        = input.bool(true, "Order Blocks", group = "Display")
+showPD        = input.bool(true, "Premium / Discount Zones", group = "Display")
+showEQ        = input.bool(true, "Equal Highs / Lows", group = "Display")
+showKillzones = input.bool(true, "Killzones", group = "Display")
+showHeatmap   = input.bool(true, "Liquidity Heatmap", group = "Display")
+showAIBar     = input.bool(true, "AI-Style Confidence Bar", group = "Display")
+
+structureLookback = input.int(10, "BOS Structure Lookback", group = "Structure")
+confirmCandles    = input.int(2, "BOS Confirm Candles", group = "Structure")
+internalLookback  = input.int(5, "Internal BOS Lookback", group = "Structure")
+internalConfirm   = input.int(1, "Internal BOS Confirm Candles", group = "Structure")
+
+// NOTE: your Python bot's default running mode is USE_XGBOOST=false ("pure SMC" mode).
+// displacementATR is corrected to 0.50 to match that mode (0.70 is the AI-mode value).
+displacementATR = input.float(0.50, "Displacement ATR Multiplier", group = "Structure")
+confidenceRequired = input.int(40, "Minimum Confidence To Signal", group = "Structure")
+
+pdLookback    = input.int(50, "Premium/Discount Range Lookback", group = "Premium/Discount")
+pivotBars     = input.int(3, "Pivot Bars (Equal Highs/Lows)", group = "Liquidity")
+eqTolerancePct = input.float(0.05, "Equal High/Low Tolerance %", group = "Liquidity") / 100
+obExtendBars  = input.int(20, "Order Block Box Length (bars)", group = "Order Blocks")
+maxOBBoxes    = input.int(8, "Max Order Blocks Shown", group = "Order Blocks")
+
+//====================================================
+// COLORS
+//====================================================
+
+bullColor    = color.new(color.lime, 0)
+bearColor    = color.new(color.red, 0)
+neutralColor = color.new(color.gray, 60)
+
+// Pretty timeframe label for the dashboard: "60" -> "1H", "240" -> "4H", etc.
+f_tfLabel(tf) =>
+    tf == "60" ? "1H" : tf == "120" ? "2H" : tf == "240" ? "4H" : tf == "D" ? "1D" : tf + "m"
+
+//====================================================
+// PART 2 -- HTF STRUCTURE FUNCTION (External / Trend BOS)
+//====================================================
+// Mirrors strategy.py bullish_bos() / bearish_bos(): structure window
+// excludes the most recent `confirm` candles, swing level = extreme of
+// that window, ALL of the last `confirm` candles must CLOSE beyond it.
+// Reused below for internal (minor) structure too, with a smaller lookback.
+
+f_htf_bos(lookback, confirm) =>
+    swingHigh = ta.highest(high[confirm], lookback)
+    swingLow  = ta.lowest(low[confirm], lookback)
+    bullBOS = true
+    bearBOS = true
+    for i = 0 to confirm - 1
+        bullBOS := bullBOS and (close[i] > swingHigh)
+        bearBOS := bearBOS and (close[i] < swingLow)
+    [bullBOS, bearBOS]
+
+[trendBull, trendBear] = request.security(
+     syminfo.tickerid, trendTF, f_htf_bos(structureLookback, confirmCandles))
+
+// Internal (minor) structure runs on the entry timeframe with a tighter
+// lookback -- this is what feeds CHoCH detection below.
+[internalBullRaw, internalBearRaw] = request.security(
+     syminfo.tickerid, entryTF, f_htf_bos(internalLookback, internalConfirm))
+
+//====================================================
+// PART 2 -- ENTRY TF FUNCTION (Volume Spike, Displacement, ATR,
+// Liquidity Sweep, Fair Value Gap)
+//====================================================
+
+f_entry_core(dispMult) =>
+    // matches Python exactly: (high - low).rolling(14).mean(),
+    // NOT Wilder's true range (ta.atr) -- kept identical on purpose.
+    atrVal = ta.sma(high - low, 14)
+    volMA = ta.sma(volume, 20)
+    atrAvgLocal = ta.sma(atrVal, 30)
+
+    // adaptive volume multiplier (pure SMC / non-XGBoost mode)
+    volMult = atrVal > atrAvgLocal * 1.3 ? 1.15 : 1.30
+
+    volSpike = volume > volMA * volMult
+    body = math.abs(close - open)
+    displacementFlag = body > atrVal * dispMult
+
+    swingLowEntry  = ta.lowest(low[1], 9)
+    swingHighEntry = ta.highest(high[1], 9)
+
+    bullSweep = low <= swingLowEntry * 1.0002 and close > open
+    bearSweep = high >= swingHighEntry * 0.9998 and close < open
+
+    bullFvg = low > high[2]
+    bearFvg = high < low[2]
+
+    // Market regime, mirroring strategy.py / xgboost_trainer.detect_market_regime():
+    // volatile if ATR > avg*1.4, else trending if 30-bar price move > 4%, else ranging.
+    // 2 = volatile, 1 = trending, 0 = ranging.
+    priceChange = na(close[30]) ? 0.0 : math.abs(close - close[30]) / close[30]
+    regimeCode = atrVal > atrAvgLocal * 1.4 ? 2 : priceChange > 0.04 ? 1 : 0
+
+    [volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, atrVal, atrAvgLocal, regimeCode]
+
+[volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, entryATR, entryATRAvg, regimeCode] =
+     request.security(syminfo.tickerid, entryTF, f_entry_core(displacementATR))
+
+// Second entry-TF helper: order block anchor candle + SL/TP swing levels
+// (matches strategy.py's iloc[-8:-1] window used for stop placement)
+
+f_entry_extra() =>
+    obBullCandle = close > open and close[1] < open[1]
+    obBearCandle = close < open and close[1] > open[1]
+    obHigh = high[1]
+    obLow  = low[1]
+    swingLow8  = ta.lowest(low[1], 8)
+    swingHigh8 = ta.highest(high[1], 8)
+    [obBullCandle, obBearCandle, obHigh, obLow, swingLow8, swingHigh8]
+
+[obBullCandle, obBearCandle, obHigh, obLow, swingLow8, swingHigh8] =
+     request.security(syminfo.tickerid, entryTF, f_entry_extra())
+
+//====================================================
+// PART 2 -- SMC SCORE (0-105) & CONFIDENCE
+//====================================================
+// Identical weighting to strategy.py's get_signal():
+// volume 25, displacement 25, trend 20, sweep 20, FVG 15
+
+smcScore = 0
+smcScore := smcScore + (volSpike ? 25 : 0)
+smcScore := smcScore + (displacementFlag ? 25 : 0)
+smcScore := smcScore + (trendBull ? 20 : 0)
+smcScore := smcScore + (trendBear ? 20 : 0)
+smcScore := smcScore + ((bullSweep or bearSweep) ? 20 : 0)
+smcScore := smcScore + ((bullFvg or bearFvg) ? 15 : 0)
+
+// Pure SMC mode: final_confidence = score, plus the same two confluence
+// bonuses your bot applies, capped 0-100. (XGBoost probability blending
+// can't be reproduced -- no ML runtime inside Pine.)
+confidence = smcScore
+confidence := confidence + (((bullSweep and bullFvg) or (bearSweep and bearFvg)) ? 5 : 0)
+confidence := confidence + ((volSpike and displacementFlag) ? 5 : 0)
+confidence := math.max(0, math.min(confidence, 100))
+
+longSignal  = trendBull and confidence >= confidenceRequired
+shortSignal = trendBear and confidence >= confidenceRequired
+
+newLong  = longSignal and not longSignal[1]
+newShort = shortSignal and not shortSignal[1]
+
+//====================================================
+// PART 2 -- SIGNAL LABELS
+//====================================================
+
+if showSignals and newLong
+    label.new(bar_index, low, "🟢 BUY\n" + str.tostring(confidence) + "%",
+         style = label.style_label_up, color = bullColor, textcolor = color.black, size = size.small)
+
+if showSignals and newShort
+    label.new(bar_index, high, "🔴 SELL\n" + str.tostring(confidence) + "%",
+         style = label.style_label_down, color = bearColor, textcolor = color.white, size = size.small)
+
+//====================================================
+// PART 2 -- EXTERNAL BOS MARKERS
+//====================================================
+
+bosUp   = trendBull and not trendBull[1]
+bosDown = trendBear and not trendBear[1]
+
+if showBOS and bosUp
+    label.new(bar_index, low, "BOS ↑", style = label.style_label_up,
+         color = color.new(bullColor, 70), textcolor = bullColor, size = size.tiny)
+
+if showBOS and bosDown
+    label.new(bar_index, high, "BOS ↓", style = label.style_label_down,
+         color = color.new(bearColor, 70), textcolor = bearColor, size = size.tiny)
+
+//====================================================
+// PART 2 -- LIQUIDITY SWEEP MARKERS & FVG BOXES
+//====================================================
+
+plotshape(showLiquidity and bullSweep, title = "Bull Liquidity Sweep", style = shape.triangleup,
+     location = location.belowbar, color = bullColor, size = size.tiny, text = "Sweep")
+
+plotshape(showLiquidity and bearSweep, title = "Bear Liquidity Sweep", style = shape.triangledown,
+     location = location.abovebar, color = bearColor, size = size.tiny, text = "Sweep")
+
+if showFVG and bullFvg
+    box.new(bar_index[2], high[2], bar_index, low, border_color = bullColor, bgcolor = color.new(bullColor, 85))
+
+if showFVG and bearFvg
+    box.new(bar_index[2], low[2], bar_index, high, border_color = bearColor, bgcolor = color.new(bearColor, 85))
+
+//====================================================
+// PART 3 -- INTERNAL STRUCTURE & CHoCH
+//====================================================
+// CHoCH = the FIRST internal break AGAINST the prevailing internal bias.
+// Every subsequent break in the same direction is just continuation
+// (an internal BOS), not a CHoCH -- matching standard ICT/SMC definitions.
+
+var string internalBias = "NEUTRAL"
+
+newInternalBull = internalBullRaw and not internalBullRaw[1]
+newInternalBear = internalBearRaw and not internalBearRaw[1]
+
+chochBull = newInternalBull and internalBias == "BEARISH"
+chochBear = newInternalBear and internalBias == "BULLISH"
+internalBosBull = newInternalBull and internalBias != "BEARISH"
+internalBosBear = newInternalBear and internalBias != "BULLISH"
+
+if newInternalBull
+    internalBias := "BULLISH"
+if newInternalBear
+    internalBias := "BEARISH"
+
+if showBOS and chochBull
+    label.new(bar_index, low, "CHoCH ↑", style = label.style_label_up,
+         color = color.new(color.aqua, 60), textcolor = color.aqua, size = size.tiny)
+
+if showBOS and chochBear
+    label.new(bar_index, high, "CHoCH ↓", style = label.style_label_down,
+         color = color.new(color.fuchsia, 60), textcolor = color.fuchsia, size = size.tiny)
+
+if showBOS and internalBosBull
+    label.new(bar_index, low, "ibos", style = label.style_label_up,
+         color = color.new(bullColor, 85), textcolor = bullColor, size = size.tiny)
+
+if showBOS and internalBosBear
+    label.new(bar_index, high, "ibos", style = label.style_label_down,
+         color = color.new(bearColor, 85), textcolor = bearColor, size = size.tiny)
+
+//====================================================
+// PART 3 -- ORDER BLOCKS
+//====================================================
+// The last down-close candle immediately before a bullish displacement
+// candle (and mirrored for bearish) -- the classic ICT order block
+// definition, anchored to your bot's own displacement flag.
+
+drawBullOB = obBullCandle and displacementFlag and close > open
+drawBearOB = obBearCandle and displacementFlag and close < open
+
+newBullOB = drawBullOB and not drawBullOB[1]
+newBearOB = drawBearOB and not drawBearOB[1]
+
+var array<box> bullOBBoxes = array.new_box(0)
+var array<box> bearOBBoxes = array.new_box(0)
+
+if showOB and newBullOB
+    newBox = box.new(bar_index - 1, obHigh, bar_index + obExtendBars, obLow,
+         border_color = color.new(color.blue, 20), bgcolor = color.new(color.blue, 85))
+    array.push(bullOBBoxes, newBox)
+    if array.size(bullOBBoxes) > maxOBBoxes
+        box.delete(array.shift(bullOBBoxes))
+
+if showOB and newBearOB
+    newBox = box.new(bar_index - 1, obHigh, bar_index + obExtendBars, obLow,
+         border_color = color.new(color.purple, 20), bgcolor = color.new(color.purple, 85))
+    array.push(bearOBBoxes, newBox)
+    if array.size(bearOBBoxes) > maxOBBoxes
+        box.delete(array.shift(bearOBBoxes))
+
+//====================================================
+// PART 3 -- PREMIUM / DISCOUNT ZONES
+//====================================================
+
+pdHigh = ta.highest(high, pdLookback)
+pdLow  = ta.lowest(low, pdLookback)
+pdEq   = (pdHigh + pdLow) / 2
+
+plotHighLine = plot(showPD ? pdHigh : na, "Range High", color = color.new(color.gray, 50))
+plotEqLine   = plot(showPD ? pdEq : na, "Equilibrium", color = color.new(color.gray, 30))
+plotLowLine  = plot(showPD ? pdLow : na, "Range Low", color = color.new(color.gray, 50))
+
+fill(plotHighLine, plotEqLine, color = showPD ? color.new(color.red, 92) : na, title = "Premium Zone")
+fill(plotEqLine, plotLowLine, color = showPD ? color.new(color.green, 92) : na, title = "Discount Zone")
+
+//====================================================
+// PART 3 -- EQUAL HIGHS / LOWS + LIQUIDITY HEATMAP
+//====================================================
+// Confirmed swing pivots are stored; any new pivot that lands within
+// tolerance of an older one is flagged as a liquidity pool (EQH/EQL).
+// The heatmap reuses that same pool data -- more historical touches
+// at a level = more opaque / thicker line, so it doubles as both
+// features without duplicating the detection logic.
+
+var array<float> pivotHighVals = array.new_float(0)
+var array<float> pivotLowVals  = array.new_float(0)
+
+ph = ta.pivothigh(pivotBars, pivotBars)
+pl = ta.pivotlow(pivotBars, pivotBars)
+
+if not na(ph)
+    array.push(pivotHighVals, ph)
+    if array.size(pivotHighVals) > 20
+        array.shift(pivotHighVals)
+
+    n = array.size(pivotHighVals)
+    if n >= 2
+        newestVal = array.get(pivotHighVals, n - 1)
+        touchCount = 0
+        for j = 0 to n - 2
+            if math.abs(newestVal - array.get(pivotHighVals, j)) <= newestVal * eqTolerancePct
+                touchCount += 1
+        if touchCount >= 1
+            if showEQ
+                label.new(bar_index[pivotBars], newestVal, "EQH", style = label.style_label_down,
+                     color = color.new(color.yellow, 70), textcolor = color.yellow, size = size.tiny)
+            if showHeatmap
+                heatTrans = math.max(30, 85 - touchCount * 15)
+                line.new(bar_index[pivotBars] - 50, newestVal, bar_index[pivotBars], newestVal,
+                     color = color.new(color.yellow, heatTrans), width = math.min(touchCount + 1, 4), extend = extend.right)
+
+if not na(pl)
+    array.push(pivotLowVals, pl)
+    if array.size(pivotLowVals) > 20
+        array.shift(pivotLowVals)
+
+    n2 = array.size(pivotLowVals)
+    if n2 >= 2
+        newestValL = array.get(pivotLowVals, n2 - 1)
+        touchCountL = 0
+        for j = 0 to n2 - 2
+            if math.abs(newestValL - array.get(pivotLowVals, j)) <= newestValL * eqTolerancePct
+                touchCountL += 1
+        if touchCountL >= 1
+            if showEQ
+                label.new(bar_index[pivotBars], newestValL, "EQL", style = label.style_label_up,
+                     color = color.new(color.orange, 70), textcolor = color.orange, size = size.tiny)
+            if showHeatmap
+                heatTransL = math.max(30, 85 - touchCountL * 15)
+                line.new(bar_index[pivotBars] - 50, newestValL, bar_index[pivotBars], newestValL,
+                     color = color.new(color.orange, heatTransL), width = math.min(touchCountL + 1, 4), extend = extend.right)
+
+//====================================================
+// PART 3 -- KILLZONES
+//====================================================
+// Same UTC hour bins as strategy.py's is_london_open / is_ny_open /
+// is_asian / is_overlap feature flags, so the dashboard session label
+// matches whatever your bot logged for that trade.
+
+utcHour = hour(time, "UTC")
+londonSession  = utcHour >= 7 and utcHour <= 11
+nySession      = utcHour >= 12 and utcHour <= 16
+overlapSession = utcHour >= 12 and utcHour <= 15
+asianSession   = utcHour >= 22 or utcHour <= 6
+
+bgcolor(showKillzones and overlapSession ? color.new(color.purple, 92) :
+     showKillzones and nySession ? color.new(color.blue, 93) :
+     showKillzones and londonSession ? color.new(color.teal, 93) :
+     showKillzones and asianSession ? color.new(color.orange, 94) : na,
+     title = "Killzones")
+
+sessionName = overlapSession ? "London/NY Overlap" : nySession ? "New York" : londonSession ? "London" : asianSession ? "Asian" : "Quiet"
+
+//====================================================
+// PART 3 -- ENTRY / SL / TP (mirrors strategy.py's pure-SMC dynamic SL/TP)
+//====================================================
+
+rrValue = smcScore >= 80 ? 2.0 : smcScore >= 60 ? 1.75 : 1.5
+slMult = 0.80
+
+longSL  = math.min(swingLow8 * 0.9995, close - entryATR * slMult)
+longTP  = close + (close - longSL) * rrValue
+shortSL = math.max(swingHigh8 * 1.0005, close + entryATR * slMult)
+shortTP = close - (shortSL - close) * rrValue
+
+if showLevels and newLong
+    line.new(bar_index, close, bar_index + 30, close, color = color.new(color.blue, 0), style = line.style_dashed)
+    line.new(bar_index, longSL, bar_index + 30, longSL, color = bearColor, style = line.style_dashed)
+    line.new(bar_index, longTP, bar_index + 30, longTP, color = bullColor, style = line.style_dashed)
+    label.new(bar_index + 30, longTP, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
+    label.new(bar_index + 30, longSL, "SL", style = label.style_label_left, color = color.new(bearColor, 80), textcolor = bearColor, size = size.tiny)
+
+if showLevels and newShort
+    line.new(bar_index, close, bar_index + 30, close, color = color.new(color.blue, 0), style = line.style_dashed)
+    line.new(bar_index, shortSL, bar_index + 30, shortSL, color = bearColor, style = line.style_dashed)
+    line.new(bar_index, shortTP, bar_index + 30, shortTP, color = bullColor, style = line.style_dashed)
+    label.new(bar_index + 30, shortTP, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
+    label.new(bar_index + 30, shortSL, "SL", style = label.style_label_left, color = color.new(bearColor, 80), textcolor = bearColor, size = size.tiny)
+
+//====================================================
+// PART 3 -- DASHBOARD
+//====================================================
+
+var table dash = table.new(position.top_right, 2, 11, border_width = 1, border_color = color.new(color.blue, 50))
+
+// Dashboard text color. Was white/gray, which is invisible on light chart
+// themes -- switched to a readable blue. Direction/severity is still conveyed
+// by the emojis and the AI bar fill, so no information is lost by dropping the
+// per-cell semantic colors.
+dashText = color.new(color.blue, 0)
+
+if barstate.islast and showDashboard
+    table.cell(dash, 0, 0, "SMC WHALE AI", text_color = color.white, bgcolor = color.new(color.blue, 30), text_size = size.small)
+    table.cell(dash, 1, 0, "", bgcolor = color.new(color.blue, 30))
+    table.merge_cells(dash, 0, 0, 1, 0)
+
+    trendLabel = trendBull ? "🟢 BULLISH" : trendBear ? "🔴 BEARISH" : "⚪ NEUTRAL"
+    table.cell(dash, 0, 1, "Trend", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 1, trendLabel, text_color = dashText, text_size = size.small)
+
+    regimeLabel = regimeCode == 2 ? "🔶 Volatile" : regimeCode == 1 ? "📈 Trending" : "➖ Ranging"
+    table.cell(dash, 0, 2, "Market", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 2, regimeLabel, text_color = dashText, text_size = size.small)
+
+    table.cell(dash, 0, 3, "Confidence", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 3, str.tostring(confidence) + "%", text_color = dashText, text_size = size.small)
+
+    barBlocks = math.round(confidence / 10)
+    barStr = ""
+    for i = 1 to 10
+        barStr := barStr + (i <= barBlocks ? "█" : "░")
+    table.cell(dash, 0, 4, "AI Bar", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 4, showAIBar ? barStr : "-", text_color = dashText, text_size = size.small)
+
+    volLabel = volSpike ? "Strong" : "Normal"
+    table.cell(dash, 0, 5, "Volume", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 5, volLabel, text_color = dashText, text_size = size.small)
+
+    atrLabel = entryATR > entryATRAvg * 1.3 ? "High" : entryATR < entryATRAvg * 0.7 ? "Low" : "Normal"
+    table.cell(dash, 0, 6, "ATR", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 6, atrLabel, text_color = dashText, text_size = size.small)
+
+    table.cell(dash, 0, 7, "RR", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 7, "1 : " + str.tostring(rrValue, "#.##"), text_color = dashText, text_size = size.small)
+
+    table.cell(dash, 0, 8, "Session", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 8, sessionName, text_color = dashText, text_size = size.small)
+
+    table.cell(dash, 0, 9, "SMC Score", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 9, str.tostring(smcScore) + " / 105", text_color = dashText, text_size = size.small)
+
+    table.cell(dash, 0, 10, "Mode", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 10, tradeMode + "  " + f_tfLabel(trendTF) + " / " + f_tfLabel(entryTF), text_color = dashText, text_size = size.small)
+
+//====================================================
+// PART 3 -- CHART TIMEFRAME GUARD
+//====================================================
+// The signal engine is pinned to entryTF/trendTF via request.security, so the
+// DASHBOARD is correct on ANY chart timeframe. But the per-bar markers
+// (BUY/SELL, FVG/OB boxes, SL/TP lines) are drawn on chart bars — and when the
+// chart TF is HIGHER than the entry TF, request.security only returns the
+// entry-TF value at each chart bar's close, so intrabar signals are missed and
+// boxes anchor to the wrong bars. Warn (don't silently mislead) in that case.
+
+chartSecs = timeframe.in_seconds()
+entrySecs = timeframe.in_seconds(entryTF)
+
+var label tfWarn = na
+if barstate.islast
+    label.delete(tfWarn)
+    if chartSecs > entrySecs
+        tfWarn := label.new(bar_index, high,
+             "⚠ Chart TF above entry TF (" + f_tfLabel(entryTF) + ")\nSwitch the chart to " + f_tfLabel(entryTF) + " (or lower) for accurate signal markers.\nDashboard is timeframe-independent.",
+             style = label.style_label_down, color = color.new(color.orange, 10),
+             textcolor = color.white, size = size.small)
+
+//====================================================
+// DEBUG PLOTS
+//====================================================
+
+plotshape(volSpike, title = "Volume Spike", style = shape.circle, location = location.belowbar, color = color.orange, size = size.tiny)
+plotshape(displacementFlag, title = "Displacement", style = shape.triangleup, location = location.belowbar, color = color.aqua, size = size.tiny)
+plot(smcScore, "SMC Score", color = color.yellow, display = display.data_window)
+plot(confidence, "Confidence", color = color.fuchsia, display = display.data_window)

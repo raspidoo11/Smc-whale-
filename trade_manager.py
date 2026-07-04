@@ -3,16 +3,20 @@ import os
 import logging
 from datetime import datetime, timedelta, timezone
 
-logger = logging.getLogger(__name__)
+from config import DATA_DIR, DAILY_LOSS_LIMIT
 
-DATA_DIR = "data"
-os.makedirs(DATA_DIR, exist_ok=True)
+logger = logging.getLogger(__name__)
 
 BALANCE_FILE = os.path.join(DATA_DIR, "paper_balance.json")
 OPEN_TRADES_FILE = os.path.join(DATA_DIR, "open_trades.json")
 HISTORY_FILE = os.path.join(DATA_DIR, "trade_history.json")
 SIGNAL_HASH_FILE = os.path.join(DATA_DIR, "signal_hashes.json")
 COOLDOWN_FILE = os.path.join(DATA_DIR, "cooldowns.json")
+
+# Storage backend: "sqlite" (default) or "json". SQLite gives atomicity + WAL
+# concurrency + queryable history and auto-migrates existing JSON on first run.
+# The JSON backend is kept as a fallback / for tests.
+STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "sqlite").lower()
 
 # ==================== JSON HELPERS ====================
 
@@ -24,33 +28,69 @@ def load_json(file_path, default):
         return default
 
 def save_json(file_path, data):
-    with open(file_path, "w") as f:
-        json.dump(data, f, indent=4)
+    """Atomic write: serialize to a temp file, fsync, then os.replace() into
+    place. Prevents a killed/restarted process (Railway redeploys, OOM, etc.)
+    from leaving a half-written, corrupt JSON file that would wipe balances or
+    open trades on next load. default=str keeps numpy/datetime values safe."""
+    tmp_path = f"{file_path}.tmp"
+    with open(tmp_path, "w") as f:
+        json.dump(data, f, indent=4, default=str)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, file_path)
 
 # ==================== CORE FUNCTIONS ====================
+# Primitive get/save dispatch to the selected backend. Everything below these
+# (add_trade, close_trade, next_trade_number, balance/hash/cooldown logic) is
+# backend-agnostic — it only calls these primitives — so the SQLite switch
+# touches nothing else.
+
+_BALANCE_DEFAULT = {"balance": 100.0, "daily_pnl": 0.0}
+
 
 def get_balance():
-    default = {"balance": 100.0, "daily_pnl": 0.0}
-    data = load_json(BALANCE_FILE, default)
-    for key, value in default.items():
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        data = db.kv_get("balance", dict(_BALANCE_DEFAULT))
+    else:
+        data = load_json(BALANCE_FILE, dict(_BALANCE_DEFAULT))
+    for key, value in _BALANCE_DEFAULT.items():
         if key not in data:
             data[key] = value
     return data
 
 def save_balance(data):
-    save_json(BALANCE_FILE, data)
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        db.kv_set("balance", data)
+    else:
+        save_json(BALANCE_FILE, data)
 
 def get_open_trades():
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        return db.read_list("open_trades")
     return load_json(OPEN_TRADES_FILE, [])
 
 def save_open_trades(trades):
-    save_json(OPEN_TRADES_FILE, trades)
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        db.write_list("open_trades", trades)
+    else:
+        save_json(OPEN_TRADES_FILE, trades)
 
 def get_trade_history():
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        return db.read_list("history")
     return load_json(HISTORY_FILE, [])
 
 def save_trade_history(history):
-    save_json(HISTORY_FILE, history)
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        db.write_list("history", history)
+    else:
+        save_json(HISTORY_FILE, history)
 
 def next_trade_number():
     return len(get_trade_history()) + len(get_open_trades()) + 1
@@ -113,7 +153,7 @@ def update_balance(pnl):
 def trading_allowed():
     if os.getenv("DAILY_PROTECTION", "true").lower() == "false":
         return True
-    return get_balance().get("daily_pnl", 0) > -15
+    return get_balance().get("daily_pnl", 0) > -DAILY_LOSS_LIMIT
 
 def reset_daily_pnl():
     data = get_balance()
@@ -151,10 +191,17 @@ def trade_exists(symbol):
 # ==================== SIGNAL HASH SYSTEM ====================
 
 def get_signal_hashes():
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        return db.kv_get("signal_hashes", [])
     return load_json(SIGNAL_HASH_FILE, [])
 
 def save_signal_hashes(hashes):
-    save_json(SIGNAL_HASH_FILE, hashes)
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        db.kv_set("signal_hashes", hashes)
+    else:
+        save_json(SIGNAL_HASH_FILE, hashes)
 
 def get_signal_hash_exists(signal_hash):
     if not signal_hash:
@@ -174,10 +221,17 @@ def save_signal_hash(signal_hash):
 # ==================== COOLDOWN SYSTEM ====================
 
 def get_cooldowns():
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        return db.kv_get("cooldowns", {})
     return load_json(COOLDOWN_FILE, {})
 
 def save_cooldowns(cooldowns):
-    save_json(COOLDOWN_FILE, cooldowns)
+    if STORAGE_BACKEND == "sqlite":
+        import db
+        db.kv_set("cooldowns", cooldowns)
+    else:
+        save_json(COOLDOWN_FILE, cooldowns)
 
 def is_symbol_in_cooldown(symbol):
     cooldowns = get_cooldowns()

@@ -13,20 +13,24 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
 from sklearn.model_selection import train_test_split
 from trade_manager import get_trade_history
+from config import MODELS_DIR
 
 logger = logging.getLogger(__name__)
 
-MODEL_PATH = "/app/data/models/xgboost_model.pkl"
-CHALLENGER_PATH = "/app/data/models/xgboost_model_challenger.pkl"
-EXPECTED_R_MODEL_PATH = "/app/data/models/expected_r_model.pkl"
-FEATURE_PATH = "/app/data/models/feature_names.pkl"
-FEATURE_HISTORY_PATH = "/app/data/models/feature_importance_history.json"
-METRICS_HISTORY_PATH = "/app/data/models/training_metrics_history.json"
-METADATA_PATH = "/app/data/models/training_metadata.json"
-DIAGNOSTICS_PATH = "/app/data/models/diagnostics_report.json"
-DIAGNOSTICS_STATE_PATH = "/app/data/models/diagnostics_state.json"
+# Paths derive from config.MODELS_DIR (default "data/models") instead of the
+# old hardcoded "/app/data/models", which only existed on Railway and broke
+# every local run on Windows/macOS.
+MODEL_PATH = os.path.join(MODELS_DIR, "xgboost_model.pkl")
+CHALLENGER_PATH = os.path.join(MODELS_DIR, "xgboost_model_challenger.pkl")
+EXPECTED_R_MODEL_PATH = os.path.join(MODELS_DIR, "expected_r_model.pkl")
+FEATURE_PATH = os.path.join(MODELS_DIR, "feature_names.pkl")
+FEATURE_HISTORY_PATH = os.path.join(MODELS_DIR, "feature_importance_history.json")
+METRICS_HISTORY_PATH = os.path.join(MODELS_DIR, "training_metrics_history.json")
+METADATA_PATH = os.path.join(MODELS_DIR, "training_metadata.json")
+DIAGNOSTICS_PATH = os.path.join(MODELS_DIR, "diagnostics_report.json")
+DIAGNOSTICS_STATE_PATH = os.path.join(MODELS_DIR, "diagnostics_state.json")
 
-os.makedirs("/app/data/models", exist_ok=True)
+os.makedirs(MODELS_DIR, exist_ok=True)
 
 ROLLING_WINDOW_SIZE = 220
 RETRAIN_EVERY_N_TRADES = 5
@@ -145,9 +149,13 @@ def extract_pro_features_from_trade(trade, historical_context=None, regime="rang
     features["is_scalp"] = 1 if rr < 1.8 else 0
     features["is_swing"] = 1 if rr >= 2.0 else 0
 
-    features["qty_size"] = np.log1p(float(trade.get("qty", 1)))
-    features["trade_duration_hours"] = float(trade.get("duration_hours", 1))
-    features["sl_tightness"] = features["risk_pct"]
+    # NOTE: qty_size and trade_duration_hours were removed here deliberately.
+    # trade_duration_hours is target leakage — it's only known AFTER a trade
+    # closes, but this classifier predicts at ENTRY time, so it can never be
+    # supplied honestly at inference. qty_size isn't known at entry either
+    # (quantity is sized downstream of the signal), so it was always a
+    # constant default live while carrying the real value in training — a
+    # train/serve skew. sl_tightness was just a duplicate of risk_pct.
 
     if historical_context:
         features["recent_win_rate"] = historical_context.get("recent_win_rate", 0.5)
@@ -202,9 +210,11 @@ def calculate_historical_context(history):
     if streak_sign is False:
         streak = -streak
 
-    cumulative_pnl = sum(float(t.get("pnl", 0)) for t in history[-20:])
+    # `... or 0` guards against legacy rows where pnl was persisted as null
+    # (from the pre-fix bug); float(None) would raise and crash training.
+    cumulative_pnl = sum(float(t.get("pnl") or 0) for t in history[-20:])
 
-    equity_curve = np.cumsum([float(t.get("pnl", 0)) for t in history[-50:]])
+    equity_curve = np.cumsum([float(t.get("pnl") or 0) for t in history[-50:]])
     if len(equity_curve) > 0:
         running_max = np.maximum.accumulate(equity_curve)
         drawdowns = running_max - equity_curve
@@ -227,9 +237,9 @@ def calculate_realized_r(trade):
     Positive for wins, negative for losses, magnitude reflects how close
     the trade got to its planned TP vs how much of its SL it ate.
     """
-    entry = float(trade.get("entry", 1))
-    sl = float(trade.get("sl", 0))
-    exit_price = float(trade.get("exit_price", entry))
+    entry = float(trade.get("entry") or 1)
+    sl = float(trade.get("sl") or 0)
+    exit_price = float(trade.get("exit_price") or entry)
     direction = trade.get("direction", "LONG")
 
     if direction == "LONG":
@@ -641,7 +651,12 @@ def _dump_and_verify(obj, path, label):
     the outcome. This is what you should grep your logs for to confirm the
     model actually landed on disk."""
     try:
-        joblib.dump(obj, path)
+        # Atomic: dump to a temp file then os.replace() into place, so a crash
+        # mid-write can't leave a half-written .pkl that joblib.load() chokes
+        # on next inference. Mirrors the atomic JSON writes in trade_manager.
+        tmp = f"{path}.tmp"
+        joblib.dump(obj, tmp)
+        os.replace(tmp, path)
         p = Path(path)
         if p.exists():
             size_kb = p.stat().st_size / 1024
@@ -778,15 +793,23 @@ def train_model_incremental(force_retrain=False):
     promote = True
     reason = "no existing champion"
 
-    if champion_metrics and challenger_metrics:
-        champ_auc = champion_metrics.get("auc") or 0
-        chal_auc = challenger_metrics.get("auc") or 0
-        if chal_auc >= champ_auc - 0.01:
-            promote = True
-            reason = f"challenger AUC {chal_auc:.3f} >= champion AUC {champ_auc:.3f} (-0.01 margin)"
-        else:
+    if champion_metrics:
+        if not challenger_metrics:
+            # We couldn't score the challenger on the holdout (e.g. single-class
+            # holdout). Never replace a validated champion with an unvalidated
+            # challenger — previously `promote` stayed True here and the
+            # challenger was promoted without any comparison.
             promote = False
-            reason = f"challenger AUC {chal_auc:.3f} < champion AUC {champ_auc:.3f}, keeping champion"
+            reason = "challenger not evaluable on holdout (single-class); keeping champion"
+        else:
+            champ_auc = champion_metrics.get("auc") or 0
+            chal_auc = challenger_metrics.get("auc") or 0
+            if chal_auc >= champ_auc - 0.01:
+                promote = True
+                reason = f"challenger AUC {chal_auc:.3f} >= champion AUC {champ_auc:.3f} (-0.01 margin)"
+            else:
+                promote = False
+                reason = f"challenger AUC {chal_auc:.3f} < champion AUC {champ_auc:.3f}, keeping champion"
 
     if promote:
         _dump_and_verify(final_model, MODEL_PATH, "PROMOTED model")
@@ -892,7 +915,14 @@ def train_model_incremental(force_retrain=False):
 _model_load_logged = False  # avoid spamming logs on every single inference call
 
 
-def get_xgboost_probability(trade_features, recent_win_rate=0.5):
+def get_xgboost_probability(trade_features):
+    """Return the calibrated P(WIN) as a 5–95% figure.
+
+    The old version added a `(recent_win_rate - 0.5) * 4` "nudge" here — but
+    recent_win_rate is ALREADY a model feature, so recent form was being counted
+    twice (once by the model, once by this post-hoc bump). Removed: the model's
+    output is already Platt-calibrated, so we just clamp it to a sane band.
+    """
     global _model_load_logged
     try:
         if not Path(MODEL_PATH).exists():
@@ -915,15 +945,8 @@ def get_xgboost_probability(trade_features, recent_win_rate=0.5):
         X = X[feature_names]
         X = X.select_dtypes(include=[np.number]).fillna(0)
 
-        raw_prob = model.predict_proba(X)[0][1] * 100
-
-        # Model output is already calibrated (Platt scaling), so this is a
-        # small live-performance nudge on top, not a substitute for calibration.
-        performance_adjustment = (recent_win_rate - 0.5) * 4
-        calibrated_prob = raw_prob + performance_adjustment
-        calibrated_prob = max(5, min(95, calibrated_prob))
-
-        return round(calibrated_prob, 1)
+        prob = model.predict_proba(X)[0][1] * 100
+        return round(max(5, min(95, prob)), 1)
 
     except Exception as e:
         logger.error(f"❌ Prediction failed: {e}")

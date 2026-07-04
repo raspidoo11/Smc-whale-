@@ -1,14 +1,16 @@
 """
 Reset trade history + model state for a fresh training run.
 
-Leaves untouched: paper_balance.json, open_trades.json, cooldowns.json,
-signal_hashes.json — none of that is part of model training.
+Backend-aware: trade history is cleared through trade_manager, so this works
+whether STORAGE_BACKEND is "sqlite" (default) or "json". Model artifacts are
+removed from config.MODELS_DIR.
 
-Backs everything up to data/backups/<timestamp>/ before deleting anything,
-so this is reversible if you change your mind.
+Leaves untouched: balance, open trades, cooldowns, signal hashes — none of
+that is part of model training.
 
-Run this from the same working directory the bot runs from (so the relative
-"data" path in trade_manager.py resolves the same way), e.g.:
+Everything is backed up to data/backups/<timestamp>/ first, so it's reversible.
+
+Run from the same working directory the bot runs from, e.g.:
 
     railway run python reset_model_state.py
 
@@ -20,10 +22,8 @@ import json
 import shutil
 from datetime import datetime
 
-DATA_DIR = "data"
-MODELS_DIR = "/app/data/models"
-
-HISTORY_FILE = os.path.join(DATA_DIR, "trade_history.json")
+from config import DATA_DIR, MODELS_DIR
+import trade_manager
 
 MODEL_FILES = [
     "xgboost_model.pkl",
@@ -51,22 +51,19 @@ def backup_and_remove(path, backup_dir):
 def main():
     timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     backup_dir = os.path.join(DATA_DIR, "backups", timestamp)
+    os.makedirs(backup_dir, exist_ok=True)
 
-    print(f"\n📦 Backing up to: {backup_dir}\n")
+    print(f"\n📦 Backing up to: {backup_dir}")
+    print(f"   Storage backend: {trade_manager.STORAGE_BACKEND}\n")
 
-    # 1. Trade history: back up, then reset to empty list (not deleted,
-    #    since trade_manager.py expects the file/JSON structure to exist).
-    if os.path.exists(HISTORY_FILE):
-        os.makedirs(backup_dir, exist_ok=True)
-        shutil.copy2(HISTORY_FILE, os.path.join(backup_dir, "trade_history.json"))
-        with open(HISTORY_FILE, "w") as f:
-            json.dump([], f, indent=4)
-        print(f"  ✅ trade history backed up, reset to empty list")
-    else:
-        print(f"  (skip, not found) {HISTORY_FILE}")
+    # 1. Trade history — read via the active backend, back it up, then clear.
+    history = trade_manager.get_trade_history()
+    with open(os.path.join(backup_dir, "trade_history.json"), "w") as f:
+        json.dump(history, f, indent=2, default=str)
+    trade_manager.save_trade_history([])
+    print(f"  ✅ backed up {len(history)} trades, history cleared")
 
-    # 2. Model state: back up and remove entirely (files get recreated on
-    #    next successful training run).
+    # 2. Model state: back up and remove (recreated on next training run).
     print(f"\n🧹 Clearing model state in {MODELS_DIR}\n")
     for filename in MODEL_FILES:
         backup_and_remove(os.path.join(MODELS_DIR, filename), backup_dir)

@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# Virtual envs
+.venv/
+.venv313/
+venv/
+env/
+
+# Local secrets
+.env
+
+# SQLite artifacts (state lives on the Railway volume, not in git)
+*.db
+*.db-wal
+*.db-shm
+
+# Model artifacts / corrupt backups
+data/models/
+*.corrupt.*
