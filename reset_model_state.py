@@ -30,6 +30,7 @@ MODEL_FILES = [
     "xgboost_model_challenger.pkl",
     "expected_r_model.pkl",
     "feature_names.pkl",
+    "expected_r_feature_names.pkl",
     "feature_importance_history.json",
     "training_metrics_history.json",
     "training_metadata.json",

@@ -24,6 +24,12 @@ MODEL_PATH = os.path.join(MODELS_DIR, "xgboost_model.pkl")
 CHALLENGER_PATH = os.path.join(MODELS_DIR, "xgboost_model_challenger.pkl")
 EXPECTED_R_MODEL_PATH = os.path.join(MODELS_DIR, "expected_r_model.pkl")
 FEATURE_PATH = os.path.join(MODELS_DIR, "feature_names.pkl")
+# The expected-R model gets its OWN feature list. It used to reuse FEATURE_PATH
+# (the classifier's list), but the two are saved at different times/conditions,
+# so after a feature-set change they drift apart and XGBoost raises a
+# feature_names mismatch at predict time. Separate files keep each model paired
+# with the exact columns it was trained on.
+EXPECTED_R_FEATURE_PATH = os.path.join(MODELS_DIR, "expected_r_feature_names.pkl")
 FEATURE_HISTORY_PATH = os.path.join(MODELS_DIR, "feature_importance_history.json")
 METRICS_HISTORY_PATH = os.path.join(MODELS_DIR, "training_metrics_history.json")
 METADATA_PATH = os.path.join(MODELS_DIR, "training_metadata.json")
@@ -770,6 +776,9 @@ def train_model_incremental(force_retrain=False):
             logger.info("   🔧 Fitting expected-R regression model...")
             r_model = fit_expected_r_model(X_full, r_target)
             _dump_and_verify(r_model, EXPECTED_R_MODEL_PATH, "expected-R model")
+            # Save the feature list this model was trained on, alongside it, so
+            # get_expected_r always aligns X to the right columns.
+            _dump_and_verify(X_full.columns.tolist(), EXPECTED_R_FEATURE_PATH, "expected-R feature list")
         except Exception as e:
             logger.warning(f"Expected-R model training failed: {e}")
     else:
@@ -954,21 +963,26 @@ def get_xgboost_probability(trade_features):
 
 
 def get_expected_r(trade_features):
-    """Spec item 2 (regression side): expected R-multiple for a candidate trade."""
+    """Spec item 2 (regression side): expected R-multiple for a candidate trade.
+
+    Uses EXPECTED_R_FEATURE_PATH (the expected-R model's OWN feature list), not
+    the classifier's FEATURE_PATH — reusing the latter caused a feature_names
+    mismatch whenever the feature set changed. Returns None (filter skipped) if
+    the model or its feature list isn't present yet, e.g. right after a
+    feature-set change, until the next retrain writes them as a matched pair.
+    """
     try:
-        if not Path(EXPECTED_R_MODEL_PATH).exists() or not Path(FEATURE_PATH).exists():
-            logger.debug("Expected-R model or feature list not found yet — skipping expected-R prediction")
+        if not Path(EXPECTED_R_MODEL_PATH).exists() or not Path(EXPECTED_R_FEATURE_PATH).exists():
+            logger.debug("Expected-R model or its feature list not found yet — skipping expected-R prediction")
             return None
 
         model = joblib.load(EXPECTED_R_MODEL_PATH)
-        feature_names = joblib.load(FEATURE_PATH)
+        feature_names = joblib.load(EXPECTED_R_FEATURE_PATH)
 
-        X = pd.DataFrame([trade_features])
-        for col in feature_names:
-            if col not in X.columns:
-                X[col] = 0
-        X = X[feature_names]
-        X = X.select_dtypes(include=[np.number]).fillna(0)
+        # reindex guarantees exactly the trained columns, in order, filling any
+        # absent ones with 0 — so XGBoost's feature-name check always passes.
+        X = pd.DataFrame([trade_features]).reindex(columns=feature_names, fill_value=0)
+        X = X.apply(pd.to_numeric, errors="coerce").fillna(0)
 
         return round(float(model.predict(X)[0]), 3)
     except Exception as e:
