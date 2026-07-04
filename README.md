@@ -94,6 +94,8 @@ Copy `.env.example` → `.env`. Environment variables:
 | `MAX_TRADES_PER_DIRECTION` | `6` | Max simultaneous same-direction positions |
 | `MAX_ALT_POSITIONS` | `8` | Max concurrent non-major (alt) positions |
 | `MIN_EXPECTED_R` | `0.0` | Min model-expected R to accept a trade (AI mode) |
+| `TRAIL_ACTIVATION_RATIO` | `0.97` | Fraction of entry→TP at which TP is cancelled and trailing arms |
+| `TRAIL_PERCENT` | `0.5` | Trailing distance as % of price |
 | `STORAGE_BACKEND` | `sqlite` | `sqlite` (auto-migrates JSON) or `json` |
 | `DATA_DIR` | `data` | State/model root (Railway volume: `/app/data`) |
 

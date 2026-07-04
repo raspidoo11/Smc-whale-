@@ -276,58 +276,66 @@ def get_wallet_balance_usdt():
         return None
 
 
-async def activate_trailing_stop(symbol, direction, qty, trail_percent=0.5, active_price=None):
+def round_price(price, market):
+    """Round a price to the symbol's tick size (Bybit rejects off-tick prices)."""
+    if not market:
+        return round(price, 6)
+    tick = market.get("precision", {}).get("price")
+    if tick and tick < 1:  # ccxt gives the tick size as a float step
+        return round(round(price / tick) * tick, 10)
+    if tick and tick >= 1:  # some markets express precision as decimal places
+        return round(price, int(tick))
+    return round(price, 6)
+
+
+async def activate_trailing_stop(symbol, current_price, trail_percent=0.5):
+    """Let a winner run: cancel the hard take-profit and attach a trailing stop.
+
+    Two fixes over the old version:
+      1. It set a trailing stop via place_order(reduceOnly, trailingStop=...) but
+         NEVER cancelled the take-profit attached at entry — so Bybit's hard TP
+         closed the position at TP first and the trade never trailed. We now use
+         set_trading_stop with takeProfit="0" to remove the TP in the same call.
+      2. Bybit's `trailingStop` is an ABSOLUTE price distance, not a percent. The
+         old code passed "0.5" (= 0.5 quote units) which is meaningless for most
+         symbols. We convert trail_percent -> price distance = price * pct/100,
+         rounded to the symbol's tick.
+    """
     if not EXECUTE_TRADES:
         logger.info(f"⏸️ EXECUTE_TRADES=false — skipping trailing stop for {symbol} (no Bybit call made)")
         return None
 
     client = get_trade_client()
+    sym = _pybit_symbol(symbol)
     try:
-        symbol = symbol.split(":")[0].replace("/", "").upper()
-
-        # FIX: Bybit closes positions automatically via the stopLoss/
-        # takeProfit attached at entry, which can happen before our local
-        # monitor notices. Check the real position size first instead of
-        # trusting the stored trade record's qty -- this is what was
-        # causing repeated "Qty invalid" errors on trades that had already
-        # closed exchange-side.
         live_size = get_open_position_size(symbol)
-
         if live_size is None:
-            logger.warning(f"Could not verify position size for {symbol}, skipping trailing stop attempt")
+            logger.warning(f"Could not verify {sym} position size; skipping trailing activation")
             return None
-
         if live_size == 0:
-            logger.info(f"Position for {symbol} already closed exchange-side, skipping trailing stop")
+            logger.info(f"{sym} already closed exchange-side; skipping trailing activation")
             return None
 
-        # Round to the symbol's actual precision instead of trusting the
-        # qty passed in from the local trade record, which may have been
-        # computed with different rounding than what Bybit expects now.
         market = get_symbol_info(symbol)
-        step = market.get("precision", {}).get("amount", 0.001) if market else 0.001
-        adjusted_qty = round(live_size / step) * step
-        adjusted_qty = round(min(adjusted_qty, live_size), 6)
+        distance = round_price(current_price * trail_percent / 100.0, market)
+        if distance <= 0:
+            logger.warning(f"{sym}: computed trailing distance {distance} <= 0; skipping")
+            return None
 
-        side = "Sell" if direction == "LONG" else "Buy"
-
-        params = {
-            "category": "linear",
-            "symbol": symbol,
-            "side": side,
-            "orderType": "Market",
-            "qty": str(adjusted_qty),
-            "reduceOnly": True,
-            "trailingStop": str(trail_percent),
-        }
-
-        if active_price:
-            params["activePrice"] = str(active_price)
-
-        result = client.place_order(**params)
-        logger.info(f"🚀 Trailing stop activated: {symbol} | {trail_percent}% | qty={adjusted_qty}")
-        return result
+        resp = client.set_trading_stop(
+            category=CATEGORY,
+            symbol=sym,
+            positionIdx=0,                 # one-way position mode
+            takeProfit="0",                # cancel the hard TP so price can run
+            trailingStop=str(distance),
+            activePrice=str(round_price(current_price, market)),
+        )
+        logger.info(
+            f"🚀 {sym}: TP cancelled, trailing stop set at {trail_percent}% "
+            f"(distance={distance}) from {current_price}"
+        )
+        return resp
 
     except Exception as e:
-        logger.exception(f"Trailing stop failed: {e}")
+        logger.exception(f"Trailing stop activation failed for {sym}: {e}")
         return None

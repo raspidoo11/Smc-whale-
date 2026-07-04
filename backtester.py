@@ -24,19 +24,29 @@ import numpy as np
 import pandas as pd
 
 import strategy
-from config import START_BALANCE
+from config import START_BALANCE, TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO
 
 logger = logging.getLogger(__name__)
 
 FEE_RATE = 0.0004          # taker fee per side
 RISK_FRACTION = 0.05       # fraction of running equity risked per trade
-TRAIL_PERCENT = 0.5
 WARMUP = 60                # bars of context before the first possible signal
 WINDOW = 250               # rolling df length handed to get_signal
 
 
-def _simulate_exit(direction, sl, tp, highs, lows, closes, trail_pct):
-    """Walk future candles; return (exit_price, reason, bars_held)."""
+def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, activation_ratio):
+    """Walk future candles; return (exit_price, reason, bars_held).
+
+    Mirrors live behavior: the hard TP is replaced by a trailing stop once price
+    reaches `activation_ratio` of the way to TP (e.g. 97%), so a winner can run
+    PAST tp instead of being capped there.
+    """
+    # Price at which the trailing stop takes over (just short of TP).
+    if direction == "LONG":
+        activation = entry + (tp - entry) * activation_ratio
+    else:
+        activation = entry - (entry - tp) * activation_ratio
+
     trailing = False
     anchor = None
     n = len(highs)
@@ -48,12 +58,12 @@ def _simulate_exit(direction, sl, tp, highs, lows, closes, trail_pct):
             if direction == "LONG":
                 if l <= sl:
                     return sl, "Stop Loss Hit", k + 1
-                if h >= tp:
+                if h >= activation:
                     trailing, anchor = True, h
             else:
                 if h >= sl:
                     return sl, "Stop Loss Hit", k + 1
-                if l <= tp:
+                if l <= activation:
                     trailing, anchor = True, l
 
         if trailing:
@@ -123,9 +133,9 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
             qty = risk_usd / per_unit
 
             exit_price, reason, bars_held = _simulate_exit(
-                direction, sl, tp,
+                direction, entry, sl, tp,
                 highs[i + 1:], lows[i + 1:], closes[i + 1:],
-                TRAIL_PERCENT,
+                TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO,
             )
             if exit_price is None:
                 break

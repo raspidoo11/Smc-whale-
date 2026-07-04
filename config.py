@@ -55,6 +55,15 @@ MAX_ALT_POSITIONS = int(os.getenv("MAX_ALT_POSITIONS", 8))
 MIN_EXPECTED_R = float(os.getenv("MIN_EXPECTED_R", 0.0))
 
 # ==========================================================
+# Trailing stop — let winners run instead of capping at TP
+# ==========================================================
+# When price gets this far along the entry->TP path, cancel the hard take-profit
+# and hand the position to a trailing stop. 0.97 = activate at 97% of the way.
+TRAIL_ACTIVATION_RATIO = float(os.getenv("TRAIL_ACTIVATION_RATIO", 0.97))
+# Trailing distance as a percent of price (0.5 = trail 0.5% behind the peak).
+TRAIL_PERCENT = float(os.getenv("TRAIL_PERCENT", 0.5))
+
+# ==========================================================
 # Scan configuration
 # ==========================================================
 SCAN_MODE = os.getenv("SCAN_MODE", "scalp")

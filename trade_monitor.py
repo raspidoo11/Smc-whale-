@@ -11,19 +11,27 @@ from bybit_executor import (
 )
 from telegram_alerts import send_alert
 from alerts import format_close_alert, format_trailing_alert
+from config import TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO
 
 logger = logging.getLogger(__name__)
 exchange = get_exchange()
-
-# Trailing-stop trail distance (percent). Used for both the live Bybit trailing
-# stop and the paper-mode simulation.
-TRAIL_PERCENT = 0.5
 
 # Live-only: how long to wait before retrying a failed trailing-stop
 # activation, and how many attempts before force-closing so a trade can't get
 # stuck open (and missing from training data) forever.
 RETRY_COOLDOWN_MINUTES = 1
 MAX_ACTIVATION_ATTEMPTS = 2
+
+
+def tp_progress(direction, entry, tp, price):
+    """Fraction of the way price has travelled from entry toward TP (0..1+).
+    1.0 == TP reached. Used to arm the trailing stop slightly BEFORE TP so we
+    can cancel the hard TP and let the winner run instead of being capped."""
+    if direction == "LONG":
+        span = tp - entry
+        return (price - entry) / span if span > 0 else 0.0
+    span = entry - tp
+    return (entry - price) / span if span > 0 else 0.0
 
 
 async def get_current_price(symbol):
@@ -163,13 +171,16 @@ async def monitor_trades():
                 # TP / SL evaluation
                 # ============================================================
                 if direction == "LONG":
-                    hit_tp = current_price >= tp
                     hit_sl = current_price <= sl
                 elif direction == "SHORT":
-                    hit_tp = current_price <= tp
                     hit_sl = current_price >= sl
                 else:
                     continue
+
+                # Arm the trailing stop when price is TRAIL_ACTIVATION_RATIO of
+                # the way to TP (e.g. 97%) rather than AT tp — so we can cancel
+                # the hard TP and let the winner run past it.
+                near_tp = tp_progress(direction, entry, tp, current_price) >= TRAIL_ACTIVATION_RATIO
 
                 if hit_sl:
                     exit_price = sl
@@ -179,7 +190,7 @@ async def monitor_trades():
                     await _close_trade_record(trade, exit_price, "Stop Loss Hit")
                     continue
 
-                if hit_tp:
+                if near_tp:
                     # ---- Paper: arm the simulated trailing stop ----
                     if not EXECUTE_TRADES:
                         trade["trailing_stop_active"] = True
@@ -187,11 +198,11 @@ async def monitor_trades():
                         trade["trail_percent"] = TRAIL_PERCENT
                         trade["trailing_stop_activated_at"] = datetime.now(timezone.utc).isoformat()
                         trades_changed = True
-                        logger.info(f"🚀 {symbol} TP reached — arming paper trailing stop")
+                        logger.info(f"🚀 {symbol} near TP ({TRAIL_ACTIVATION_RATIO:.0%}) — arming paper trailing stop")
                         await send_alert(format_trailing_alert(trade, current_price, TRAIL_PERCENT))
                         continue
 
-                    # ---- Live: activate the Bybit trailing stop (with retry) ----
+                    # ---- Live: cancel TP + activate the Bybit trailing stop ----
                     attempts = trade.get("trailing_stop_attempts", 0)
                     minutes_since_last = _minutes_since(trade.get("trailing_stop_last_attempt"))
 
@@ -209,11 +220,10 @@ async def monitor_trades():
                         )
                         continue
 
-                    logger.info(f"🚀 Activating trailing stop on {symbol} (TP reached)")
+                    logger.info(f"🚀 Activating trailing stop on {symbol} (near TP)")
                     result = await activate_trailing_stop(
                         symbol=symbol,
-                        direction=direction,
-                        qty=qty,
+                        current_price=current_price,
                         trail_percent=TRAIL_PERCENT,
                     )
 
