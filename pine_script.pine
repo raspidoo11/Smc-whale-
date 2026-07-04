@@ -8,20 +8,31 @@ indicator("SMC Whale AI", overlay = true, max_labels_count = 500, max_boxes_coun
 // PART 1 -- INPUTS
 //====================================================
 
-// Trading-mode presets — mirrors the Python config's SCALP/SWING timeframe
-// pairs and adds a Day-trade preset in between. Switch this to change both
-// timeframes at once; "Custom" falls back to the two manual fields below.
-//   Scalp : 15m trend / 5m entry
-//   Day   : 1H  trend / 15m entry
-//   Swing : 4H  trend / 30m entry
-tradeMode = input.string("Scalp", "Trading Mode", options = ["Scalp", "Day", "Swing", "Custom"], group = "Timeframes",
-     tooltip = "Scalp = 15m/5m · Day = 1H/15m · Swing = 4H/30m · Custom = use the two fields below")
+// Trading mode.
+//   Auto   : entry = your CURRENT chart TF, trend = next HTF up. Just switch
+//            the chart (5m to scalp, 15m to day-trade, 30m/1H to swing) and the
+//            indicator follows — no timeframe warning. This is the default.
+//   Scalp  : 15m trend / 5m entry     (fixed)
+//   Day    : 1H  trend / 15m entry    (fixed)
+//   Swing  : 4H  trend / 30m entry    (fixed)
+//   Custom : use the two "Custom ... TF" fields below.
+// IMPORTANT: the Custom TF fields ONLY apply when Mode = "Custom". In any other
+// mode they are ignored (this is what trips people up).
+tradeMode = input.string("Auto", "Trading Mode", options = ["Auto", "Scalp", "Day", "Swing", "Custom"], group = "Timeframes",
+     tooltip = "Auto = entry matches your current chart, trend = next HTF up (switch charts freely, no warning).\nScalp = 15m/5m · Day = 1H/15m · Swing = 4H/30m.\nCustom = use the two fields below — these are IGNORED unless Mode is Custom.")
 
-customTrendTF = input.timeframe("15", "Custom Trend TF", group = "Timeframes")
-customEntryTF = input.timeframe("5", "Custom Entry TF", group = "Timeframes")
+customTrendTF = input.timeframe("15", "Custom Trend TF (Custom mode only)", group = "Timeframes")
+customEntryTF = input.timeframe("5", "Custom Entry TF (Custom mode only)", group = "Timeframes")
 
-trendTF = tradeMode == "Scalp" ? "15" : tradeMode == "Day" ? "60" : tradeMode == "Swing" ? "240" : customTrendTF
-entryTF = tradeMode == "Scalp" ? "5"  : tradeMode == "Day" ? "15" : tradeMode == "Swing" ? "30"  : customEntryTF
+// Chart timeframe in seconds — drives Auto mode and the TF guard below.
+chartSecs = timeframe.in_seconds()
+
+// Auto: entry = chart TF, trend = a sensible higher timeframe for it.
+autoEntryTF = timeframe.period
+autoTrendTF = chartSecs <= 60 ? "5" : chartSecs <= 300 ? "15" : chartSecs <= 900 ? "60" : chartSecs <= 3600 ? "240" : chartSecs <= 14400 ? "D" : "W"
+
+trendTF = tradeMode == "Auto" ? autoTrendTF : tradeMode == "Scalp" ? "15" : tradeMode == "Day" ? "60" : tradeMode == "Swing" ? "240" : customTrendTF
+entryTF = tradeMode == "Auto" ? autoEntryTF : tradeMode == "Scalp" ? "5"  : tradeMode == "Day" ? "15" : tradeMode == "Swing" ? "30"  : customEntryTF
 
 showDashboard = input.bool(true, "Dashboard", group = "Display")
 showSignals   = input.bool(true, "Signals", group = "Display")
@@ -60,9 +71,10 @@ bullColor    = color.new(color.lime, 0)
 bearColor    = color.new(color.red, 0)
 neutralColor = color.new(color.gray, 60)
 
-// Pretty timeframe label for the dashboard: "60" -> "1H", "240" -> "4H", etc.
+// Pretty timeframe label for the dashboard: "60" -> "1H", "240" -> "4H". Passes
+// through non-minute periods (timeframe.period style "1D"/"1W"/"1S") unchanged.
 f_tfLabel(tf) =>
-    tf == "60" ? "1H" : tf == "120" ? "2H" : tf == "240" ? "4H" : tf == "D" ? "1D" : tf + "m"
+    str.contains(tf, "D") or str.contains(tf, "W") or str.contains(tf, "M") or str.contains(tf, "S") ? tf : tf == "60" ? "1H" : tf == "120" ? "2H" : tf == "180" ? "3H" : tf == "240" ? "4H" : tf + "m"
 
 //====================================================
 // PART 2 -- HTF STRUCTURE FUNCTION (External / Trend BOS)
@@ -467,7 +479,9 @@ if barstate.islast and showDashboard
 // entry-TF value at each chart bar's close, so intrabar signals are missed and
 // boxes anchor to the wrong bars. Warn (don't silently mislead) in that case.
 
-chartSecs = timeframe.in_seconds()
+// chartSecs is defined up top. In Auto mode entryTF == the chart TF, so this
+// guard never fires; it only warns for the fixed presets when the chart is
+// coarser than their entry TF.
 entrySecs = timeframe.in_seconds(entryTF)
 
 var label tfWarn = na
