@@ -96,6 +96,12 @@ NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "false").lower() == "true
 # Adverse slippage applied to every simulated fill, as a percent of price
 # (0.02 = 2 basis points each side).
 SLIPPAGE_PCT = float(os.getenv("SLIPPAGE_PCT", 0.02))
+# Bybit linear-perp fee schedule. Limit fills that rest on the book pay maker;
+# market orders (and SL/trailing exits, which fire at market) pay taker. When
+# the gross edge per scalp is thin, this maker/taker split — not the signal —
+# often decides whether a mode is profitable.
+MAKER_FEE_RATE = float(os.getenv("MAKER_FEE_RATE", 0.0002))
+TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", 0.00055))
 
 # ==========================================================
 # Scan configuration

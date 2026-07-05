@@ -31,11 +31,11 @@ from config import (
     ENTRY_MODE,
     LIMIT_TTL_MINUTES,
     SLIPPAGE_PCT,
+    MAKER_FEE_RATE,
+    TAKER_FEE_RATE,
 )
 
 logger = logging.getLogger(__name__)
-
-FEE_RATE = 0.0004          # taker fee per side
 RISK_FRACTION = 0.05       # fraction of running equity risked per trade
 WARMUP = 60                # bars of context before the first possible signal
 WINDOW = 250               # rolling df length handed to get_signal
@@ -190,7 +190,10 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
             exit_price = exit_price * (1 - slip if direction == "LONG" else 1 + slip)
 
             gross = (exit_price - entry) * qty if direction == "LONG" else (entry - exit_price) * qty
-            fees = (entry * qty + exit_price * qty) * FEE_RATE
+            # Maker/taker split: resting limit fills pay maker on entry; market
+            # entries and ALL exits (SL/trailing fire at market) pay taker.
+            entry_fee_rate = MAKER_FEE_RATE if ENTRY_MODE == "limit" else TAKER_FEE_RATE
+            fees = entry * qty * entry_fee_rate + exit_price * qty * TAKER_FEE_RATE
             pnl = gross - fees
             equity += pnl
             equity_curve.append(equity)
