@@ -57,38 +57,34 @@ def prepare_backfill(trades_by_symbol, max_trades):
     return tagged
 
 
-def main():
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
-    logging.getLogger("strategy").setLevel(logging.WARNING)
+def run_backfill(symbols=None, candles=3000, max_trades=150, replace=False):
+    """Core backfill, callable from the CLI below or from main.py at startup
+    (BACKFILL_ON_START=true). Returns a one-line ASCII summary of what
+    happened. Idempotent: if backfilled rows already exist and replace is
+    False, it does nothing — safe to leave enabled across restarts."""
+    symbols = symbols or DEFAULT_SYMBOLS
 
-    p = argparse.ArgumentParser(description="Backfill trade history with backtest-simulated trades.")
-    p.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
-    p.add_argument("--candles", type=int, default=3000)
-    p.add_argument("--max-trades", type=int, default=150,
-                   help="Cap on backfilled rows (rolling window is 220 — leave room for real trades)")
-    p.add_argument("--replace", action="store_true",
-                   help="Remove previously backfilled rows before adding the new batch")
-    args = p.parse_args()
-
-    # Imported here so --help works without network/config side effects.
-    from backtester import simulate, fetch_ohlcv_paginated
+    # Existing-backfill guard runs BEFORE any network import/fetch.
     from trade_manager import get_trade_history, save_trade_history
 
     history = get_trade_history()
     existing_backtest = [t for t in history if t.get("source") == "backtest"]
     real_rows = [t for t in history if t.get("source") != "backtest"]
 
-    if existing_backtest and not args.replace:
-        print(f"History already contains {len(existing_backtest)} backfilled trades. "
-              f"Re-run with --replace to refresh them.")
-        return
+    if existing_backtest and not replace:
+        msg = (f"History already contains {len(existing_backtest)} backfilled trades "
+               f"- skipping (use replace to refresh)")
+        logger.info(msg)
+        return msg
+
+    from backtester import simulate, fetch_ohlcv_paginated
 
     trades_by_symbol = {}
-    for sym in args.symbols:
+    for sym in symbols:
         try:
-            logger.info(f"Backtesting {sym} ({args.candles} x 5m candles)...")
-            df5 = fetch_ohlcv_paginated(sym, "5m", args.candles)
-            df15 = fetch_ohlcv_paginated(sym, "15m", max(args.candles // 3, 200))
+            logger.info(f"Backtesting {sym} ({candles} x 5m candles)...")
+            df5 = fetch_ohlcv_paginated(sym, "5m", candles)
+            df15 = fetch_ohlcv_paginated(sym, "15m", max(candles // 3, 200))
             trades, metrics = simulate(sym, df5, df15, use_xgboost=False)
             trades_by_symbol[sym] = trades
             logger.info(f"   {sym}: {len(trades)} simulated trades "
@@ -96,10 +92,11 @@ def main():
         except Exception as e:
             logger.warning(f"   {sym} failed ({e}) — skipping")
 
-    backfill = prepare_backfill(trades_by_symbol, args.max_trades)
+    backfill = prepare_backfill(trades_by_symbol, max_trades)
     if not backfill:
-        print("No simulated trades produced — nothing to backfill.")
-        return
+        msg = "No simulated trades produced - nothing to backfill"
+        logger.info(msg)
+        return msg
 
     # Backup before touching history (mirrors reset_model_state.py).
     backup_dir = os.path.join(
@@ -114,13 +111,33 @@ def main():
     save_trade_history(backfill + real_rows)
 
     wins = sum(1 for t in backfill if t.get("status") == "WIN")
-    # ASCII-only output: emoji crash on Windows cp1252 consoles.
-    print(f"\n[OK] Backfilled {len(backfill)} simulated trades "
-          f"({wins} W / {len(backfill) - wins} L) ahead of {len(real_rows)} real trades.")
-    if existing_backtest:
-        print(f"   (replaced {len(existing_backtest)} previously backfilled rows)")
-    print(f"   Backup: {backup_dir}")
-    print("   Next scheduled retrain will pick them up automatically "
+    # ASCII-only summary: emoji crash on Windows cp1252 consoles.
+    msg = (f"[OK] Backfilled {len(backfill)} simulated trades "
+           f"({wins} W / {len(backfill) - wins} L) ahead of {len(real_rows)} real trades"
+           + (f", replacing {len(existing_backtest)} old backfilled rows" if existing_backtest else "")
+           + f". Backup: {backup_dir}")
+    logger.info(msg)
+    return msg
+
+
+def main():
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+    logging.getLogger("strategy").setLevel(logging.WARNING)
+
+    p = argparse.ArgumentParser(description="Backfill trade history with backtest-simulated trades.")
+    p.add_argument("--symbols", nargs="+", default=DEFAULT_SYMBOLS)
+    p.add_argument("--candles", type=int, default=3000)
+    p.add_argument("--max-trades", type=int, default=150,
+                   help="Cap on backfilled rows (rolling window is 220 — leave room for real trades)")
+    p.add_argument("--replace", action="store_true",
+                   help="Remove previously backfilled rows before adding the new batch")
+    args = p.parse_args()
+
+    print(run_backfill(
+        symbols=args.symbols, candles=args.candles,
+        max_trades=args.max_trades, replace=args.replace,
+    ))
+    print("Next scheduled retrain will pick them up automatically "
           "(or run: python -c \"from xgboost_trainer import train_model_incremental; train_model_incremental()\")")
 
 

@@ -85,3 +85,22 @@ def test_prepare_backfill_caps_keeping_most_recent():
     rows = prepare_backfill(by_symbol, max_trades=2)
     assert len(rows) == 2
     assert [r["entry_time"] for r in rows] == ["2026-07-04 10:00", "2026-07-05 10:00"]
+
+
+def test_run_backfill_idempotent_guard(monkeypatch):
+    """With backfilled rows already present and replace=False, run_backfill
+    must return without fetching anything (BACKFILL_ON_START stays safe to
+    leave enabled across restarts)."""
+    import trade_manager
+    from backfill_from_backtest import run_backfill
+
+    monkeypatch.setattr(
+        trade_manager, "get_trade_history",
+        lambda: [{"symbol": "BTCUSDT", "status": "WIN", "source": "backtest"}],
+    )
+    saves = []
+    monkeypatch.setattr(trade_manager, "save_trade_history", lambda h: saves.append(h))
+
+    msg = run_backfill(replace=False)
+    assert "skipping" in msg
+    assert saves == []  # nothing written, nothing fetched

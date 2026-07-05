@@ -1,4 +1,5 @@
 import asyncio
+import os
 import schedule
 import time
 import logging
@@ -340,6 +341,22 @@ async def startup():
     await send_alert("🚀 <b>SMC Whale Bot Started</b>\nPaper Mode + Session Bonus Active")
 
 
+def maybe_backfill_on_start():
+    """Set BACKFILL_ON_START=true in Railway Variables to seed trade history
+    with backtest-simulated training rows on the next boot — no CLI needed.
+    Idempotent (skips if backfilled rows already exist), so it's safe to leave
+    the variable set. Any failure is logged and never blocks the bot."""
+    if os.getenv("BACKFILL_ON_START", "false").lower() != "true":
+        return
+    try:
+        from backfill_from_backtest import run_backfill
+        logger.info("🧪 BACKFILL_ON_START=true — running backtest backfill (one-time, ~1-2 min)...")
+        summary = run_backfill()
+        logger.info(f"🧪 Backfill result: {summary}")
+    except Exception as e:
+        logger.exception(f"Backfill on start failed (bot continues normally): {e}")
+
+
 def main():
     logger.info("🚀 Starting SMC Whale AI (Improved Version)")
     logger.info(f"📊 Max Open Trades: {MAX_OPEN_TRADES}")
@@ -347,6 +364,7 @@ def main():
     logger.info("🕒 Session bonus system enabled")
 
     asyncio.run(startup())
+    maybe_backfill_on_start()
     run_scan_sync(force=True)
     run_monitor_sync()
     retrain_model()
