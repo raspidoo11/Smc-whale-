@@ -200,6 +200,12 @@ def extract_pro_features_from_trade(trade, historical_context=None, regime="rang
     features["is_extreme_fear"] = 1 if fng <= 20 else 0
     features["is_extreme_greed"] = 1 if fng >= 80 else 0
 
+    # Candle Range Theory: swept the previous 1H candle's low/high (aligned
+    # with trade direction) and reclaimed back inside its range. crt_x_sweep
+    # is the textbook combo — the HTF purge confirming the 5m sweep.
+    features["crt"] = int(trade.get("crt", 0) or 0)
+    features["crt_x_sweep"] = features["crt"] * int(trade.get("sweep", 0) or 0)
+
     features["volume_x_displacement"] = trade.get("volume_spike", 0) * trade.get("displacement", 0)
     features["sweep_x_fvg"] = trade.get("sweep", 0) * trade.get("fvg", 0)
     features["volatility_x_risk"] = atr * features["risk_pct"]

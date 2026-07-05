@@ -1,8 +1,8 @@
 {
-  "trained_at": "2026-07-05T10:15:34.717695+00:00",
+  "trained_at": "2026-07-05T14:18:57.933160+00:00",
   "pretrained_base": true,
   "model_type": "xgboost+lightgbm_ensemble",
-  "corpus_trades": 4800,
+  "corpus_trades": 4516,
   "corpus_symbols": [
     "BTC/USDT:USDT",
     "ETH/USDT:USDT",
@@ -26,14 +26,14 @@
     "AAVE/USDT:USDT"
   ],
   "corpus_days": 90,
-  "cv_mean_auc": 0.6371923611779,
+  "cv_mean_auc": 0.6509343930336596,
   "cv_fold_aucs": [
-    0.4642159297897003,
-    0.6348390535472941,
-    0.710578252671276,
-    0.7137460096797446,
-    0.6625825602014854
+    0.5132616487455197,
+    0.6356137970434906,
+    0.7120817685216798,
+    0.7359657538228968,
+    0.6577489970347112
   ],
-  "cv_mean_brier": 0.23002381270635888,
-  "n_features": 57
+  "cv_mean_brier": 0.2284814145720629,
+  "n_features": 59
 }

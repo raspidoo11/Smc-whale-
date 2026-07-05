@@ -38,6 +38,11 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = os.path.join(DATA_DIR, "pretrain_cache")
 
+# Bump when the SIGNAL SNAPSHOT schema changes (new persisted fields): cached
+# corpus rows generated before the change would silently miss the new feature
+# (defaulting to 0 everywhere = a dead constant in CV). v2 = added CRT.
+CACHE_VERSION = 2
+
 # Liquid, non-meme perps across sectors — regime + symbol diversity.
 DEFAULT_SYMBOLS = [
     "BTC/USDT:USDT", "ETH/USDT:USDT", "SOL/USDT:USDT", "BNB/USDT:USDT",
@@ -88,7 +93,7 @@ def collect_symbol(sym, days, provider=None, cache_dir=CACHE_DIR):
     (funding, OI) here."""
     os.makedirs(cache_dir, exist_ok=True)
     safe = re.sub(r"[^A-Za-z0-9]+", "_", sym)
-    cache_file = os.path.join(cache_dir, f"{safe}_{days}d.json")
+    cache_file = os.path.join(cache_dir, f"{safe}_{days}d_v{CACHE_VERSION}.json")
     if os.path.exists(cache_file):
         with open(cache_file) as f:
             trades = json.load(f)

@@ -160,6 +160,34 @@ def bearish_bos(df, structure_lookback=10, confirm_candles=2):
     return bool((recent_closes < swing_low).all())
 
 
+def crt_flags(df_5m):
+    """Candle Range Theory: has price swept the PREVIOUS completed 1H candle's
+    low (or high) and reclaimed back inside its range? The manipulation leg of
+    ICT's power-of-three, viewed per HTF candle — sweep below the prior hour's
+    low that closes back above it implies expansion toward the other side.
+
+    Purely price-derived (resampled from the 5m frame), so live, backtest and
+    pretraining compute it identically. Returns (bull_crt, bear_crt) as 0/1.
+    """
+    try:
+        if len(df_5m) < 15:
+            return 0, 0
+        h1 = df_5m.resample("1h").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last"}
+        ).dropna()
+        if len(h1) < 2:
+            return 0, 0
+        # Last resampled bucket is the in-progress hour (built from closed 5m
+        # bars); the bucket before it is the previous COMPLETED 1H candle.
+        cur, prev = h1.iloc[-1], h1.iloc[-2]
+        latest_close = float(df_5m["close"].iloc[-1])
+        bull_crt = int(cur["low"] < prev["low"] and latest_close > prev["low"])
+        bear_crt = int(cur["high"] > prev["high"] and latest_close < prev["high"])
+        return bull_crt, bear_crt
+    except Exception:
+        return 0, 0
+
+
 # ==========================================================
 # MAIN SIGNAL ENGINE
 # ==========================================================
@@ -238,6 +266,11 @@ def get_signal(symbol, df_15m, df_5m):
             df_5m["high"].iloc[-1]
             < df_5m["low"].iloc[-3]
         )
+
+        # Candle Range Theory: sweep-and-reclaim of the previous 1H candle's
+        # range. Feature only — deliberately NOT added to the SMC score, so
+        # signal generation is unchanged; the model decides its worth.
+        bull_crt, bear_crt = crt_flags(df_5m)
 
         score = 0
 
@@ -483,6 +516,7 @@ def get_signal(symbol, df_15m, df_5m):
             "displacement": int(latest["displacement"]),
             "sweep": int(bull_sweep if trend_bull else bear_sweep),
             "fvg": int(bull_fvg if trend_bull else bear_fvg),
+            "crt": int(bull_crt if trend_bull else bear_crt),
             "atr": float(atr),
             "body": float(latest["body"]) if pd.notna(latest["body"]) else 0.0,
             "volume": float(latest["volume"]) if pd.notna(latest["volume"]) else 0.0,
