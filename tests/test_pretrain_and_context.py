@@ -106,6 +106,21 @@ def test_purged_folds_respect_embargo_and_order():
 
 
 # ---------------------------------------------------------------------------
+# Sample weights: corpus training must not decay away its own data
+# ---------------------------------------------------------------------------
+
+def test_sample_weights_uniform_when_half_life_none():
+    from xgboost_trainer import make_sample_weights
+    w = make_sample_weights(5000, half_life=None)
+    assert w.min() == w.max() == 1.0
+
+    # And the live default really does concentrate on the tail — the reason
+    # pretrain must NOT use it: ~87 effective samples regardless of n.
+    w_live = make_sample_weights(5000)
+    assert w_live.sum() < 100
+
+
+# ---------------------------------------------------------------------------
 # Fear & Greed featurization
 # ---------------------------------------------------------------------------
 

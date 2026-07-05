@@ -172,7 +172,11 @@ def run_pretrain(symbols, days, n_folds, embargo_hours, promote):
         X_tr, y_tr = prepare_X_y(tr_df)
         X_te, y_te = prepare_X_y(te_df)
         X_te = X_te.reindex(columns=X_tr.columns, fill_value=0)
-        model, _, _ = fit_candidate_model(X_tr, y_tr, use_ensemble=use_ensemble)
+        # Uniform weights: recency decay (built for the live 220-trade window)
+        # would collapse a multi-regime corpus to ~87 effective samples and
+        # produce degenerate constant models on large folds.
+        model, _, _ = fit_candidate_model(X_tr, y_tr, use_ensemble=use_ensemble,
+                                          recency_half_life=None)
         m = evaluate_model(model, X_te, y_te) or {}
         if m.get("auc") is not None:
             aucs.append(m["auc"])
@@ -196,7 +200,8 @@ def run_pretrain(symbols, days, n_folds, embargo_hours, promote):
         return mean_auc
 
     X_full, y_full = prepare_X_y(df)
-    final_model, _, model_type = fit_candidate_model(X_full, y_full, use_ensemble=use_ensemble)
+    final_model, _, model_type = fit_candidate_model(X_full, y_full, use_ensemble=use_ensemble,
+                                                     recency_half_life=None)
     _dump_and_verify(final_model, MODEL_PATH, "PRETRAINED base model")
     _dump_and_verify(X_full.columns.tolist(), FEATURE_PATH, "feature name list")
 
@@ -217,8 +222,20 @@ def run_pretrain(symbols, days, n_folds, embargo_hours, promote):
         "cv_mean_brier": mean_brier,
         "n_features": len(X_full.columns),
     })
+
+    # Also export the artifacts into ./pretrained/ (committed to git). The
+    # Railway volume mounts over /app/data, shadowing anything committed
+    # there — main.maybe_import_pretrained() copies these into MODELS_DIR on
+    # boot instead, marker-guarded so it happens once per pretrained build.
+    import shutil
+    os.makedirs("pretrained", exist_ok=True)
+    for src in (MODEL_PATH, FEATURE_PATH, EXPECTED_R_MODEL_PATH,
+                EXPECTED_R_FEATURE_PATH, METADATA_PATH):
+        shutil.copy2(src, os.path.join("pretrained", os.path.basename(src)))
     print(f"\n[OK] Pretrained base installed as champion ({model_type}, "
           f"{len(df)} trades, CV AUC {mean_auc:.3f}).")
+    print("Artifacts exported to ./pretrained/ — commit them and Railway will "
+          "import the model on next boot.")
     print("Live retraining continues on top — a live challenger must beat this "
           "champion on holdout AUC to replace it.")
     return mean_auc

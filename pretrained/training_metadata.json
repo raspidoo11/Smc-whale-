@@ -1,0 +1,39 @@
+{
+  "trained_at": "2026-07-05T10:15:34.717695+00:00",
+  "pretrained_base": true,
+  "model_type": "xgboost+lightgbm_ensemble",
+  "corpus_trades": 4800,
+  "corpus_symbols": [
+    "BTC/USDT:USDT",
+    "ETH/USDT:USDT",
+    "SOL/USDT:USDT",
+    "BNB/USDT:USDT",
+    "XRP/USDT:USDT",
+    "ADA/USDT:USDT",
+    "LINK/USDT:USDT",
+    "AVAX/USDT:USDT",
+    "DOT/USDT:USDT",
+    "LTC/USDT:USDT",
+    "ATOM/USDT:USDT",
+    "NEAR/USDT:USDT",
+    "APT/USDT:USDT",
+    "ARB/USDT:USDT",
+    "OP/USDT:USDT",
+    "SUI/USDT:USDT",
+    "TON/USDT:USDT",
+    "TRX/USDT:USDT",
+    "UNI/USDT:USDT",
+    "AAVE/USDT:USDT"
+  ],
+  "corpus_days": 90,
+  "cv_mean_auc": 0.6371923611779,
+  "cv_fold_aucs": [
+    0.4642159297897003,
+    0.6348390535472941,
+    0.710578252671276,
+    0.7137460096797446,
+    0.6625825602014854
+  ],
+  "cv_mean_brier": 0.23002381270635888,
+  "n_features": 57
+}

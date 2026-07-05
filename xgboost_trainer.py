@@ -400,6 +400,13 @@ def prepare_X_y(df, feature_history=None, drop_decayed=True, target_col="target"
 
 
 def make_sample_weights(n, half_life=60):
+    """Recency decay for LIVE incremental training (rolling ~220-trade window).
+    half_life=None -> uniform weights: required for large offline corpora,
+    where a 60-trade half-life would silently reduce thousands of trades to
+    ~87 effective samples (sum of the geometric series) and defeat the point
+    of building the corpus at all."""
+    if half_life is None:
+        return np.ones(n)
     ages = np.arange(n)[::-1]
     return 0.5 ** (ages / half_life)
 
@@ -491,10 +498,11 @@ def evaluate_model(model, X_test, y_test):
     return {"auc": auc, "log_loss": ll, "brier": brier, "n_test": len(y_test)}
 
 
-def fit_candidate_model(X_train, y_train, use_ensemble=True, source_weights=None):
+def fit_candidate_model(X_train, y_train, use_ensemble=True, source_weights=None,
+                        recency_half_life=60):
     win_count = int((y_train == 1).sum())
     loss_count = int((y_train == 0).sum())
-    weights = make_sample_weights(len(y_train))
+    weights = make_sample_weights(len(y_train), half_life=recency_half_life)
     if source_weights is not None:
         weights = weights * np.asarray(source_weights)
     cv_folds = 3 if len(y_train) >= 60 else 2

@@ -341,6 +341,49 @@ async def startup():
     await send_alert("🚀 <b>SMC Whale Bot Started</b>\nPaper Mode + Session Bonus Active")
 
 
+def maybe_import_pretrained():
+    """Install a committed ./pretrained/ model into MODELS_DIR on boot.
+
+    The Railway volume mounts over /app/data, shadowing any model files
+    committed to the repo — so pretrain.py exports its artifacts to
+    ./pretrained/ (versioned in git) and this copies them onto the volume.
+    Marker-guarded by the pretrained build's trained_at timestamp: each
+    pretrained build imports exactly ONCE, so live fine-tuning afterwards is
+    never clobbered by a restart. Set PRETRAINED_IMPORT=false to disable."""
+    if os.getenv("PRETRAINED_IMPORT", "true").lower() != "true":
+        return
+    try:
+        import json
+        import shutil
+        from config import MODELS_DIR
+
+        meta_path = os.path.join("pretrained", "training_metadata.json")
+        if not os.path.exists(meta_path):
+            return
+        with open(meta_path) as f:
+            meta = json.load(f)
+        build_id = meta.get("trained_at", "")
+
+        marker_path = os.path.join(MODELS_DIR, "pretrained_import_marker.json")
+        if os.path.exists(marker_path):
+            with open(marker_path) as f:
+                if json.load(f).get("imported_build") == build_id:
+                    return  # this build already imported; don't clobber live fine-tuning
+
+        for name in os.listdir("pretrained"):
+            shutil.copy2(os.path.join("pretrained", name), os.path.join(MODELS_DIR, name))
+        with open(marker_path, "w") as f:
+            json.dump({"imported_build": build_id}, f)
+
+        logger.info(
+            f"🧠 Imported pretrained base model (built {build_id}, "
+            f"CV AUC {meta.get('cv_mean_auc', '?')}, "
+            f"{meta.get('corpus_trades', '?')} corpus trades)"
+        )
+    except Exception as e:
+        logger.exception(f"Pretrained import failed (bot continues normally): {e}")
+
+
 def maybe_backfill_on_start():
     """Set BACKFILL_ON_START=true in Railway Variables to seed trade history
     with backtest-simulated training rows on the next boot — no CLI needed.
@@ -373,6 +416,7 @@ def main():
     logger.info("🕒 Session bonus system enabled")
 
     asyncio.run(startup())
+    maybe_import_pretrained()
     maybe_backfill_on_start()
     run_scan_sync(force=True)
     run_monitor_sync()
