@@ -713,11 +713,8 @@ def train_model_incremental(force_retrain=False):
     of both classes. Also adds explicit "is training actually running /
     did the files really get written" logging throughout.
     """
-    logger.info("=" * 60)
-    logger.info("🚀 train_model_incremental() called")
-
     history = get_trade_history()
-    logger.info(f"   Total trade history rows: {len(history)}")
+    logger.info(f"🚀 Retrain: {len(history)} history rows")
 
     if len(history) < MIN_TRADES_TO_TRAIN:
         logger.info(f"⏳ Waiting for trades ({len(history)}/{MIN_TRADES_TO_TRAIN}) — skipping this run")
@@ -885,31 +882,30 @@ def train_model_incremental(force_retrain=False):
     n_backtest = int((df["sample_source"] == "backtest").sum()) if "sample_source" in df.columns else 0
     n_real = len(df) - n_backtest
 
-    logger.info(f"   Model type: {model_type}")
-    logger.info(f"   Trades Learned: {len(df)} (W: {win_count}, L: {loss_count}, Win Rate: {win_rate:.1%})")
-    logger.info(f"   Sample mix: {n_real} real + {n_backtest} backtest-backfilled "
-                f"(backfilled rows train at {BACKTEST_SAMPLE_WEIGHT}x weight)")
+    # Compact summary — one line per fact instead of the old multi-block dump
+    # (Railway rate-limits at 500 logs/sec and was dropping messages).
+    logger.info(f"   Model: {model_type} | learned {len(df)} trades "
+                f"(W{win_count}/L{loss_count}, {win_rate:.0%}) | "
+                f"mix {n_real} real + {n_backtest} backtest @{BACKTEST_SAMPLE_WEIGHT}x")
     if challenger_metrics:
-        logger.info(f"   Holdout AUC: {challenger_metrics.get('auc')}")
-        logger.info(f"   Holdout Log Loss: {challenger_metrics.get('log_loss')}")
-        logger.info(f"   Holdout Brier Score: {challenger_metrics.get('brier')}")
+        auc = challenger_metrics.get("auc")
+        brier = challenger_metrics.get("brier")
+        logger.info(f"   Holdout: AUC {auc if auc is None else f'{auc:.3f}'} | "
+                    f"Brier {brier if brier is None else f'{brier:.3f}'}")
 
     if current_importance:
         ranked = sorted(current_importance.items(), key=lambda kv: kv[1], reverse=True)
-        logger.info(f"\n   📊 Top 10 Features:")
-        for feat, imp in ranked[:10]:
-            decay = feature_history.get(feat, {}).get("decay_multiplier", 1.0)
-            logger.info(f"      {feat}: {imp:.3f} (decay: {decay:.2f})")
+        top5 = ", ".join(f"{feat} {imp:.2f}" for feat, imp in ranked[:5])
+        logger.info(f"   📊 Top features: {top5}")
 
     if len(history) > 0:
         last_trade = history[-1]
-        logger.info(f"\n   📈 Latest Trade Analysis:")
-        logger.info(f"      Trade #{last_trade.get('trade_no', '?')}: {last_trade.get('symbol', '?')}")
-        logger.info(f"      Direction: {last_trade.get('direction', '?')}")
-        logger.info(f"      Entry → Exit: ${last_trade.get('entry', 0):.6f} → ${last_trade.get('exit_price', 0):.6f}")
-        logger.info(f"      Result: {last_trade.get('status', '?')} ({last_trade.get('pnl', 0):+.2f}%)")
-        realized_r = calculate_realized_r(last_trade)
-        logger.info(f"      Realized R: {realized_r:+.2f}")
+        logger.info(
+            f"   📈 Last trade: #{last_trade.get('trade_no', '?')} "
+            f"{last_trade.get('symbol', '?')} {last_trade.get('direction', '?')} "
+            f"{last_trade.get('status', '?')} pnl {last_trade.get('pnl', 0) or 0:+.2f} "
+            f"R {calculate_realized_r(last_trade):+.2f}"
+        )
 
     metrics_history.append({
         "timestamp": datetime.utcnow().isoformat(),
@@ -949,8 +945,7 @@ def train_model_incremental(force_retrain=False):
     # just the rolling window, on a ~100-trade cadence.
     maybe_run_diagnostics(full_history_for_diagnostics, current_importance)
 
-    logger.info("🏁 train_model_incremental() finished")
-    logger.info("=" * 60)
+    logger.info("🏁 Retrain finished")
 
     return final_model if promote else (champion if champion_metrics else final_model)
 

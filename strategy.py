@@ -587,37 +587,26 @@ def get_signal(symbol, df_15m, df_5m):
         )
 
         # ==========================================================
-        # Detailed Logging
+        # Logging — ONE compact line per evaluated setup. The old 25-line
+        # banner multiplied by every trending symbol per scan (and by every
+        # bar in a backfill) blew straight through Railway's 500 logs/sec
+        # rate limit and got messages dropped.
+        # Reads: symbol, direction, confluences hit, confidence vs required.
         # ==========================================================
 
+        confluences = "".join([
+            "V" if latest["volume_spike"] else "-",
+            "D" if latest["displacement"] else "-",
+            "S" if (bull_sweep or bear_sweep) else "-",
+            "F" if (bull_fvg or bear_fvg) else "-",
+        ])
+        passed = final_confidence >= confidence_required
         logger.info(
-
-            f"""
-================ SIGNAL SCAN ================
-
-Symbol            : {symbol}
-
-Mode              : {'AI' if USE_XGBOOST else 'SMC'}
-
-Trend Bull        : {trend_bull}
-Trend Bear        : {trend_bear}
-
-Volume Spike      : {latest['volume_spike']}
-Displacement      : {latest['displacement']}
-Liquidity Sweep   : {bull_sweep or bear_sweep}
-Fair Value Gap    : {bull_fvg or bear_fvg}
-
-SMC Score         : {score}
-AI Probability    : {ai_prob:.2f}
-AI Vote Weight    : {ai_weight:.0%} (scales with real closed trades)
-
-Risk Reward       : {risk_reward:.2f}
-
-Final Confidence  : {final_confidence}
-Required          : {confidence_required}
-
-=============================================
-"""
+            f"{'🎯' if passed else '·'} {symbol} {direction} "
+            f"| smc {score} [{confluences}] "
+            f"| ai {ai_prob:.0f}%@{ai_weight:.0%} "
+            f"| conf {final_confidence}/{confidence_required} "
+            f"| rr {risk_reward:.1f} | {market_regime}"
         )
 
         # ==========================================================

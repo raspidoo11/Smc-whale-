@@ -183,10 +183,11 @@ async def _handle_pending_order(trade, symbol, direction, current_price, open_tr
 async def monitor_trades():
     try:
         open_trades = get_open_trades()
-        logger.info(f"📊 Monitoring {len(open_trades)} open trade(s)")
 
         if not open_trades:
-            return
+            return  # nothing to do — and no log line every 35s saying so
+
+        logger.info(f"📊 Monitoring {len(open_trades)} open trade(s)")
 
         trades_changed = False
 
@@ -210,7 +211,10 @@ async def monitor_trades():
                 if not all([entry, sl, tp, direction, qty]):
                     continue
 
-                logger.info(
+                # Per-trade price ticks are DEBUG: with 10 open trades this
+                # printed ~17 lines/min at INFO and added nothing actionable —
+                # state CHANGES (fills, closes, trailing arms) log at INFO.
+                logger.debug(
                     f"{symbol} | Current={current_price:.6f} | TP={tp:.6f} | SL={sl:.6f}"
                 )
 

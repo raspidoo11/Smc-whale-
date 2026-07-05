@@ -123,7 +123,7 @@ async def scan():
                     signal = get_signal(symbol, df_15m, df_5m)
 
                     if signal:
-                        logger.info(f"✅ Signal Found | {symbol} | {signal['direction']} | Confidence={signal['confidence']}")
+                        # (strategy already logged the compact 🎯 line)
                         # Check for duplicate using signal_hash
                         if get_signal_hash_exists(signal.get("signal_hash")):
                             logger.info(f"⏭️ Duplicate signal_hash skipped: {symbol}")
@@ -351,7 +351,16 @@ def maybe_backfill_on_start():
     try:
         from backfill_from_backtest import run_backfill
         logger.info("🧪 BACKFILL_ON_START=true — running backtest backfill (one-time, ~1-2 min)...")
-        summary = run_backfill()
+        # The signal engine logs one line per evaluated bar — over a ~24k-bar
+        # backfill that alone exceeds Railway's 500 logs/sec limit. Silence it
+        # for the duration, exactly like the CLI entry point does.
+        strat_logger = logging.getLogger("strategy")
+        prev_level = strat_logger.level
+        strat_logger.setLevel(logging.WARNING)
+        try:
+            summary = run_backfill()
+        finally:
+            strat_logger.setLevel(prev_level)
         logger.info(f"🧪 Backfill result: {summary}")
     except Exception as e:
         logger.exception(f"Backfill on start failed (bot continues normally): {e}")
