@@ -41,6 +41,11 @@ os.makedirs(MODELS_DIR, exist_ok=True)
 ROLLING_WINDOW_SIZE = 220
 RETRAIN_EVERY_N_TRADES = 5
 
+# Backtest-backfilled trades (source == "backtest") train at reduced weight:
+# they warm-start the model when real data is scarce, but a simulated fill
+# must never outvote a real one.
+BACKTEST_SAMPLE_WEIGHT = 0.5
+
 MIN_TRADES_TO_TRAIN = 30
 MIN_TRADES_FOR_ENSEMBLE = 90       # below this: logistic regression only, no ensemble
 MIN_HOLDOUT_SIZE = 15
@@ -359,6 +364,10 @@ def build_feature_frame(history):
         row = extract_pro_features_from_trade(trade, context, regime=regime)
         row["target"] = 1 if trade["status"] == "WIN" else 0
         row["realized_r"] = calculate_realized_r(trade)
+        # Metadata, not a feature: string column, so prepare_X_y's
+        # select_dtypes(number) drops it from X automatically. Used only to
+        # down-weight simulated rows during fitting.
+        row["sample_source"] = trade.get("source", "live")
         rows.append(row)
 
     return pd.DataFrame(rows)
@@ -471,10 +480,12 @@ def evaluate_model(model, X_test, y_test):
     return {"auc": auc, "log_loss": ll, "brier": brier, "n_test": len(y_test)}
 
 
-def fit_candidate_model(X_train, y_train, use_ensemble=True):
+def fit_candidate_model(X_train, y_train, use_ensemble=True, source_weights=None):
     win_count = int((y_train == 1).sum())
     loss_count = int((y_train == 0).sum())
     weights = make_sample_weights(len(y_train))
+    if source_weights is not None:
+        weights = weights * np.asarray(source_weights)
     cv_folds = 3 if len(y_train) >= 60 else 2
 
     if not use_ensemble:
@@ -517,7 +528,7 @@ def fit_candidate_model(X_train, y_train, use_ensemble=True):
     return ensemble, raw_models, "xgboost+lightgbm_ensemble"
 
 
-def fit_expected_r_model(X_train, r_train):
+def fit_expected_r_model(X_train, r_train, source_weights=None):
     """Spec item 2 (regression side): auxiliary model predicting realized R.
     Logged/exposed separately — does not replace the win/loss classifier."""
     model = XGBRegressor(
@@ -525,7 +536,7 @@ def fit_expected_r_model(X_train, r_train):
         subsample=0.8, colsample_bytree=0.8, reg_alpha=0.5, reg_lambda=1.0,
         random_state=42, verbosity=0,
     )
-    model.fit(X_train, r_train)
+    model.fit(X_train, r_train, sample_weight=source_weights)
     return model
 
 
@@ -760,8 +771,15 @@ def train_model_incremental(force_retrain=False):
         )
         return None
 
+    def _source_mults(frame):
+        if "sample_source" not in frame.columns:
+            return None
+        return np.where(frame["sample_source"] == "backtest", BACKTEST_SAMPLE_WEIGHT, 1.0)
+
     logger.info("   🔧 Fitting challenger model on train split...")
-    challenger, challenger_raw_models, model_type = fit_candidate_model(X_train, y_train, use_ensemble=use_ensemble)
+    challenger, challenger_raw_models, model_type = fit_candidate_model(
+        X_train, y_train, use_ensemble=use_ensemble, source_weights=_source_mults(train_df)
+    )
     challenger_metrics = evaluate_model(challenger, X_test, y_test)
     logger.info(f"   Challenger holdout metrics: {challenger_metrics}")
 
@@ -779,7 +797,9 @@ def train_model_incremental(force_retrain=False):
     # the promotion decision itself is based on the honest holdout above.
     logger.info("   🔧 Refitting final model on full window...")
     X_full, y_full = prepare_X_y(df, feature_history)
-    final_model, final_raw_models, _ = fit_candidate_model(X_full, y_full, use_ensemble=use_ensemble)
+    final_model, final_raw_models, _ = fit_candidate_model(
+        X_full, y_full, use_ensemble=use_ensemble, source_weights=_source_mults(df)
+    )
 
     # Expected-R auxiliary regression (spec item 2)
     df_r = df.loc[X_full.index] if len(df) == len(X_full) else df
@@ -787,7 +807,7 @@ def train_model_incremental(force_retrain=False):
     if r_target is not None and r_target.notna().sum() >= 20:
         try:
             logger.info("   🔧 Fitting expected-R regression model...")
-            r_model = fit_expected_r_model(X_full, r_target)
+            r_model = fit_expected_r_model(X_full, r_target, source_weights=_source_mults(df))
             _dump_and_verify(r_model, EXPECTED_R_MODEL_PATH, "expected-R model")
             # Save the feature list this model was trained on, alongside it, so
             # get_expected_r always aligns X to the right columns.
@@ -862,8 +882,13 @@ def train_model_incremental(force_retrain=False):
     loss_count = int((y_full == 0).sum())
     win_rate = win_count / max(len(y_full), 1)
 
+    n_backtest = int((df["sample_source"] == "backtest").sum()) if "sample_source" in df.columns else 0
+    n_real = len(df) - n_backtest
+
     logger.info(f"   Model type: {model_type}")
     logger.info(f"   Trades Learned: {len(df)} (W: {win_count}, L: {loss_count}, Win Rate: {win_rate:.1%})")
+    logger.info(f"   Sample mix: {n_real} real + {n_backtest} backtest-backfilled "
+                f"(backfilled rows train at {BACKTEST_SAMPLE_WEIGHT}x weight)")
     if challenger_metrics:
         logger.info(f"   Holdout AUC: {challenger_metrics.get('auc')}")
         logger.info(f"   Holdout Log Loss: {challenger_metrics.get('log_loss')}")

@@ -55,14 +55,40 @@ def test_dynamic_threshold_bounded():
 
 # ----- expected-R filter (wired into get_signal, AI mode) -----
 
+# The veto only applies once the model has learned from >=60 REAL closed
+# trades (backtest-backfilled rows don't count) — see strategy.py.
+_REAL_HISTORY_60 = [
+    {"symbol": "XUSDT", "status": "WIN" if i % 2 else "LOSS", "pnl": 1.0 if i % 2 else -1.0}
+    for i in range(60)
+]
+
+
 def test_expected_r_filter_rejects_low_r(monkeypatch):
     monkeypatch.setattr(strategy, "USE_XGBOOST", True)
+    monkeypatch.setattr(strategy, "get_trade_history", lambda: list(_REAL_HISTORY_60))
     monkeypatch.setattr(strategy, "get_xgboost_probability", lambda f: 90.0)
     monkeypatch.setattr(strategy, "get_dynamic_confidence_threshold", lambda **k: 40)
     monkeypatch.setattr(strategy, "MIN_EXPECTED_R", 0.0)
     monkeypatch.setattr(strategy, "get_expected_r", lambda f: -0.5)  # model expects a loss in R
 
     assert get_signal("BTCUSDT", _breakout_df().copy(), _breakout_df().copy()) is None
+
+
+def test_expected_r_filter_dormant_below_60_real_trades(monkeypatch):
+    # 59 real closed trades (plus any number of backtest rows) -> the veto must
+    # NOT fire, even on a terrible expected R: a warm-start model must not
+    # bias the live training data it is trying to learn from.
+    history = list(_REAL_HISTORY_60[:59]) + [
+        {"symbol": "XUSDT", "status": "LOSS", "pnl": -1.0, "source": "backtest"}
+    ] * 100
+    monkeypatch.setattr(strategy, "USE_XGBOOST", True)
+    monkeypatch.setattr(strategy, "get_trade_history", lambda: history)
+    monkeypatch.setattr(strategy, "get_xgboost_probability", lambda f: 90.0)
+    monkeypatch.setattr(strategy, "get_dynamic_confidence_threshold", lambda **k: 40)
+    monkeypatch.setattr(strategy, "MIN_EXPECTED_R", 0.0)
+    monkeypatch.setattr(strategy, "get_expected_r", lambda f: -0.5)
+
+    assert get_signal("BTCUSDT", _breakout_df().copy(), _breakout_df().copy()) is not None
 
 
 def test_expected_r_filter_allows_good_r(monkeypatch):

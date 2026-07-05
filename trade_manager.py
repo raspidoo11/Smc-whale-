@@ -93,7 +93,10 @@ def save_trade_history(history):
         save_json(HISTORY_FILE, history)
 
 def next_trade_number():
-    return len(get_trade_history()) + len(get_open_trades()) + 1
+    # Backtest-backfilled rows are training data, not trades this bot took —
+    # they must not inflate the visible trade numbering in alerts.
+    real_history = [t for t in get_trade_history() if t.get("source") != "backtest"]
+    return len(real_history) + len(get_open_trades()) + 1
 
 def add_trade(trade):
     trades = get_open_trades()

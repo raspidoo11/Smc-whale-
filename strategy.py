@@ -34,6 +34,21 @@ NOW_FN = lambda: datetime.now(timezone.utc)
 # and the featurizer treats the missing values as neutral defaults.
 MARKET_CONTEXT_FN = lambda symbol: {}
 
+
+def ai_blend_weight(n_real_closed, max_weight=0.40, min_trades=30, full_at=150):
+    """How much say the model gets in final confidence, as a function of how
+    many REAL closed trades it has learned from (backtest-backfilled rows
+    don't count — they're warm-start data, not evidence).
+
+    A model trained on 42 trades shouldn't carry the same 40% vote as one
+    trained on 300: below `min_trades` it gets zero say (pure SMC score);
+    influence then ramps linearly, reaching the full `max_weight` at
+    `full_at`. E.g. 42 real trades -> 40% * (12/120) = 4% influence."""
+    if n_real_closed <= min_trades:
+        return 0.0
+    ramp = min(1.0, (n_real_closed - min_trades) / (full_at - min_trades))
+    return round(max_weight * ramp, 4)
+
 # Module-level set to track recent signals for cooldown (prevents duplicate alerts on same candle)
 # For multi-pair scanners, manage recent_signals per symbol (e.g. dict of sets) or include symbol in signal_hash
 recent_signals = set()
@@ -505,6 +520,7 @@ def get_signal(symbol, df_15m, df_5m):
 
         ai_prob = 50.0
         expected_r = None
+        ai_weight = 0.0
 
         if USE_XGBOOST:
             features = extract_pro_features_from_trade(
@@ -527,9 +543,21 @@ def get_signal(symbol, df_15m, df_5m):
             # confidence that adapts to market conditions (looser in clean
             # trends, stricter in chop/high-vol and after a losing run) instead
             # of a hardcoded constant.
+            #
+            # The model's vote is scaled by how many REAL closed trades it has
+            # learned from (ai_blend_weight): a 42-trade model gets ~4% say,
+            # not the full 40% — trust is earned with sample size, not granted
+            # the moment a model file exists.
+            n_real_closed = len([
+                t for t in history
+                if t.get("status") in ("WIN", "LOSS")
+                and t.get("source", "live") != "backtest"
+            ])
+            ai_weight = ai_blend_weight(n_real_closed)
+
             final_confidence = int(
-                (score * 0.60) +
-                (ai_prob * 0.40)
+                (score * (1 - ai_weight)) +
+                (ai_prob * ai_weight)
             )
 
             confidence_required = get_dynamic_confidence_threshold(
@@ -581,6 +609,7 @@ Fair Value Gap    : {bull_fvg or bear_fvg}
 
 SMC Score         : {score}
 AI Probability    : {ai_prob:.2f}
+AI Vote Weight    : {ai_weight:.0%} (scales with real closed trades)
 
 Risk Reward       : {risk_reward:.2f}
 
@@ -623,7 +652,17 @@ Required          : {confidence_required}
         # the win probability clears the confidence bar — a low win rate on
         # good R can be fine, but a decent win rate on poor R is not. Skipped
         # (expected_r is None) until the model has trained.
-        if USE_XGBOOST and expected_r is not None and expected_r < MIN_EXPECTED_R:
+        #
+        # Also gated on >=60 REAL closed trades: a model warmed up mostly on
+        # backtest rows must not VETO live entries — that would bias the very
+        # training data being collected (setups it wrongly dislikes would
+        # never get a real outcome to correct it with).
+        if (
+            USE_XGBOOST
+            and expected_r is not None
+            and n_real_closed >= 60
+            and expected_r < MIN_EXPECTED_R
+        ):
             logger.info(
                 f"↩️ {symbol}: expected R {expected_r:.2f} < {MIN_EXPECTED_R} — skipping"
             )
