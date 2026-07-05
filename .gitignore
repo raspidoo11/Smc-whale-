@@ -22,3 +22,4 @@ env/
 data/models/
 *.corrupt.*
 data/backups/
+data/pretrain_cache/

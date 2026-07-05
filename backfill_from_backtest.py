@@ -78,6 +78,10 @@ def run_backfill(symbols=None, candles=3000, max_trades=150, replace=False):
         return msg
 
     from backtester import simulate, fetch_ohlcv_paginated
+    from historical_context import HistoricalContextProvider
+
+    provider = HistoricalContextProvider()
+    preloaded_global = False
 
     trades_by_symbol = {}
     for sym in symbols:
@@ -85,7 +89,18 @@ def run_backfill(symbols=None, candles=3000, max_trades=150, replace=False):
             logger.info(f"Backtesting {sym} ({candles} x 5m candles)...")
             df5 = fetch_ohlcv_paginated(sym, "5m", candles)
             df15 = fetch_ohlcv_paginated(sym, "15m", max(candles // 3, 200))
-            trades, metrics = simulate(sym, df5, df15, use_xgboost=False)
+
+            # Historical funding / OI / BTC trend / Fear&Greed, so backfilled
+            # rows carry REAL context features instead of neutral zeros.
+            start_ms = int(df5.index[0].timestamp() * 1000)
+            end_ms = int(df5.index[-1].timestamp() * 1000)
+            if not preloaded_global:
+                provider.preload_global(start_ms, end_ms)
+                preloaded_global = True
+            provider.preload(sym, start_ms, end_ms)
+
+            trades, metrics = simulate(sym, df5, df15, use_xgboost=False,
+                                       context_provider=provider)
             trades_by_symbol[sym] = trades
             logger.info(f"   {sym}: {len(trades)} simulated trades "
                         f"(win rate {metrics.get('win_rate', 0):.0%})")

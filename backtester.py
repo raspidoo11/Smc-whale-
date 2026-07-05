@@ -103,13 +103,23 @@ def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, act
     return float(closes[-1]) if n else None, "Open at data end", n
 
 
-def simulate(symbol, df_5m, df_15m, use_xgboost=False):
-    """Pure, offline replay. Returns (trades, metrics)."""
+def simulate(symbol, df_5m, df_15m, use_xgboost=False, context_provider=None):
+    """Pure, offline replay. Returns (trades, metrics).
+
+    context_provider: optional historical_context.HistoricalContextProvider
+    (already preloaded). When given, replayed signals carry the REAL funding /
+    OI / BTC-trend / Fear&Greed values of the bar being replayed instead of
+    neutral defaults — so backfilled training rows teach the model its
+    market-context features. Replay stays network-free either way.
+    """
     # Feed the signal engine simulated history + candle-time, then restore.
     orig_hist = strategy.get_trade_history
     orig_now = strategy.NOW_FN
     orig_xgb = strategy.USE_XGBOOST
+    orig_ctx = strategy.MARKET_CONTEXT_FN
     strategy.USE_XGBOOST = use_xgboost
+    if context_provider is not None:
+        strategy.MARKET_CONTEXT_FN = context_provider
 
     sim_history = []
     equity = float(START_BALANCE)
@@ -228,6 +238,7 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
         strategy.get_trade_history = orig_hist
         strategy.NOW_FN = orig_now
         strategy.USE_XGBOOST = orig_xgb
+        strategy.MARKET_CONTEXT_FN = orig_ctx
 
     metrics = compute_metrics(trades, equity_curve)
     metrics["unfilled_limit_orders"] = unfilled

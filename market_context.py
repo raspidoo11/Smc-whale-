@@ -17,13 +17,17 @@ doesn't triple its API usage; get_signal additionally only calls this for
 setups that already passed the cheap SMC pre-filter.
 """
 
+import json
 import time
 import logging
+import urllib.request
 
 logger = logging.getLogger(__name__)
 
 _CACHE = {}
-_TTL = {"funding": 300, "oi": 300, "btc": 300, "spread": 60}
+_TTL = {"funding": 300, "oi": 300, "btc": 300, "spread": 60, "fng": 3600}
+
+FNG_URL = "https://api.alternative.me/fng/?limit=1"
 
 
 def _cached(kind, key, ttl, fn):
@@ -94,6 +98,17 @@ def get_spread_pct(symbol):
     return _cached("spread", symbol, _TTL["spread"], fetch)
 
 
+def get_fng():
+    """Crypto Fear & Greed index (0=extreme fear, 100=extreme greed), daily,
+    from alternative.me. Sentiment regime — contrarian gold at the extremes."""
+    def fetch():
+        with urllib.request.urlopen(FNG_URL, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        rows = data.get("data") or []
+        return float(rows[0]["value"]) if rows else None
+    return _cached("fng", "global", _TTL["fng"], fetch)
+
+
 def get_market_context(symbol):
     """Full enrichment dict for a candidate signal. Missing values come back as
     None; the featurizer maps None to neutral defaults, so an API hiccup can
@@ -103,4 +118,5 @@ def get_market_context(symbol):
         "oi_change_pct": get_oi_change_pct(symbol),
         "btc_trend": get_btc_trend(),
         "spread_pct": get_spread_pct(symbol),
+        "fng": get_fng(),
     }

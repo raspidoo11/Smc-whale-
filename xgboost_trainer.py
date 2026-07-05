@@ -13,7 +13,7 @@ from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
 from sklearn.model_selection import train_test_split
 from trade_manager import get_trade_history
-from config import MODELS_DIR
+from config import MODELS_DIR, WIN_LABEL_MIN_R
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +194,12 @@ def extract_pro_features_from_trade(trade, historical_context=None, regime="rang
     # Positive funding on a long = paying to join the crowded side.
     features["funding_vs_direction"] = features["funding_rate"] * is_long
 
+    # Sentiment regime: Fear & Greed index (0 fear .. 100 greed, 50 neutral).
+    fng = float(trade.get("fng") or 50.0)
+    features["fng"] = fng
+    features["is_extreme_fear"] = 1 if fng <= 20 else 0
+    features["is_extreme_greed"] = 1 if fng >= 80 else 0
+
     features["volume_x_displacement"] = trade.get("volume_spike", 0) * trade.get("displacement", 0)
     features["sweep_x_fvg"] = trade.get("sweep", 0) * trade.get("fvg", 0)
     features["volatility_x_risk"] = atr * features["risk_pct"]
@@ -362,8 +368,13 @@ def build_feature_frame(history):
         context = calculate_historical_context(history[:i])
         regime = trade.get("market_regime", "ranging")
         row = extract_pro_features_from_trade(trade, context, regime=regime)
-        row["target"] = 1 if trade["status"] == "WIN" else 0
-        row["realized_r"] = calculate_realized_r(trade)
+        # Label engineering: positive class = "realized at least WIN_LABEL_MIN_R"
+        # (default 0.5R), NOT "pnl > 0". A +0.05R scratch and a +2.5R runner
+        # are different outcomes; labeling both WIN taught the model to
+        # predict fee-noise. Balance/streak accounting still uses status.
+        r = calculate_realized_r(trade)
+        row["target"] = 1 if r >= WIN_LABEL_MIN_R else 0
+        row["realized_r"] = r
         # Metadata, not a feature: string column, so prepare_X_y's
         # select_dtypes(number) drops it from X automatically. Used only to
         # down-weight simulated rows during fitting.
@@ -958,7 +969,9 @@ _model_load_logged = False  # avoid spamming logs on every single inference call
 
 
 def get_xgboost_probability(trade_features):
-    """Return the calibrated P(WIN) as a 5–95% figure.
+    """Return the calibrated probability (5–95%) that this setup realizes at
+    least WIN_LABEL_MIN_R (default 0.5R) — i.e. a MEANINGFUL win, not a
+    fee-noise scratch. See build_feature_frame's label engineering.
 
     The old version added a `(recent_win_rate - 0.5) * 4` "nudge" here — but
     recent_win_rate is ALREADY a model feature, so recent form was being counted

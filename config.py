@@ -54,6 +54,11 @@ MAX_ALT_POSITIONS = int(os.getenv("MAX_ALT_POSITIONS", 8))
 # the expected-R model has trained, and none at all in pure-SMC mode.
 MIN_EXPECTED_R = float(os.getenv("MIN_EXPECTED_R", 0.0))
 
+# Label engineering: the classifier's positive label is "realized R >= this",
+# not "pnl > 0". A +0.05R scratch teaches the model nothing worth repeating —
+# training on meaningful wins keeps it from learning to predict fee-noise.
+WIN_LABEL_MIN_R = float(os.getenv("WIN_LABEL_MIN_R", 0.5))
+
 # ==========================================================
 # Trailing stop — let winners run instead of capping at TP
 # ==========================================================

@@ -504,6 +504,7 @@ def get_signal(symbol, df_15m, df_5m):
             "oi_change_pct": market_ctx.get("oi_change_pct"),
             "btc_trend": market_ctx.get("btc_trend"),
             "spread_pct": market_ctx.get("spread_pct"),
+            "fng": market_ctx.get("fng"),
             "symbol_win_rate": float(symbol_win_rate),
         }
 
