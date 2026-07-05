@@ -4,6 +4,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from scanner import get_live_symbols as get_top_symbols, get_ohlcv
+import strategy
 from strategy import get_signal
 from paper_trader import calculate_qty
 from bybit_executor import execute_trade
@@ -24,10 +25,22 @@ from trade_monitor import monitor_trades
 from xgboost_trainer import train_model_incremental
 from trade_manager import get_trade_history
 from bybit_executor import EXECUTE_TRADES
-from config import MAX_OPEN_TRADES
-from alerts import format_open_alert
+from config import (
+    MAX_OPEN_TRADES,
+    ENTRY_MODE,
+    LIMIT_TTL_MINUTES,
+    SPREAD_MAX_FRACTION_OF_RISK,
+    NEWS_FILTER_ENABLED,
+)
+from alerts import format_open_alert, format_limit_alert
 from risk_manager import can_open_trade
 from reconcile import reconcile
+from market_context import get_market_context
+from news_filter import get_news_status
+
+# Wire live market-context enrichment (funding / OI / BTC trend / spread) into
+# the signal engine. The backtester never does this, so it stays offline.
+strategy.MARKET_CONTEXT_FN = get_market_context
 
 logging.basicConfig(
     level=logging.INFO,
@@ -45,16 +58,29 @@ else:
 SCAN_LOCK = asyncio.Lock()           # Prevents overlapping scans
 
 
+def count_active_trades():
+    """OPEN positions + PENDING limit orders both consume a slot — a resting
+    order is committed risk the moment it can fill."""
+    return len([
+        t for t in get_open_trades()
+        if t.get("status") in ("OPEN", "PENDING")
+    ])
+
+
 async def get_fresh_symbols(limit=30):
-    """Get symbols excluding those we already have open trades on"""
+    """Get symbols excluding those we already have open trades or resting
+    limit orders on."""
     open_trades = get_open_trades()
-    open_symbols = {t["symbol"] for t in open_trades if t.get("status") == "OPEN"}
+    open_symbols = {
+        t["symbol"] for t in open_trades
+        if t.get("status") in ("OPEN", "PENDING")
+    }
 
     # Get more symbols than needed so we can filter
     all_symbols = get_top_symbols(100)
 
     fresh_symbols = [s for s in all_symbols if s not in open_symbols][:limit]
-    logger.info(f"📊 Fresh symbols selected: {len(fresh_symbols)} (excluded {len(open_symbols)} open)")
+    logger.info(f"📊 Fresh symbols selected: {len(fresh_symbols)} (excluded {len(open_symbols)} open/pending)")
 
     return fresh_symbols
 
@@ -71,9 +97,14 @@ async def scan():
                 logger.info("⛔ Daily loss limit reached. Trading paused.")
                 return
 
-            open_trades = get_open_trades()
-            if len([t for t in open_trades if t.get("status") == "OPEN"]) >= MAX_OPEN_TRADES:
-                logger.info(f"📉 Max open trades ({MAX_OPEN_TRADES}) reached. Skipping scan.")
+            if NEWS_FILTER_ENABLED:
+                paused, news_reason = get_news_status()
+                if paused:
+                    logger.info(f"📰 Entries paused: {news_reason}")
+                    return
+
+            if count_active_trades() >= MAX_OPEN_TRADES:
+                logger.info(f"📉 Max open+pending trades ({MAX_OPEN_TRADES}) reached. Skipping scan.")
                 return
 
             symbols = await get_fresh_symbols(30)
@@ -97,6 +128,36 @@ async def scan():
                             logger.info(f"⏭️ Duplicate signal_hash skipped: {symbol}")
                             continue
 
+                        # Spread gate: if the bid-ask spread eats too much of
+                        # the planned risk, the edge is gone before we start.
+                        spread_pct = signal.get("spread_pct")
+                        if spread_pct is not None:
+                            spread_abs = spread_pct / 100 * signal["entry"]
+                            max_spread = SPREAD_MAX_FRACTION_OF_RISK * abs(signal["entry"] - signal["sl"])
+                            if spread_abs > max_spread:
+                                logger.info(
+                                    f"🕳️ {symbol}: spread {spread_pct:.3f}% eats "
+                                    f">{SPREAD_MAX_FRACTION_OF_RISK:.0%} of risk — skipping"
+                                )
+                                continue
+
+                        # Limit mode: enter at the retracement level, resize
+                        # SL/TP economics around the actual limit entry.
+                        if ENTRY_MODE == "limit":
+                            limit_entry = float(signal["limit_price"])
+                            rr = float(signal.get("rr_multiplier", 1.5))
+                            sl = float(signal["sl"])
+                            if signal["direction"] == "LONG":
+                                tp = limit_entry + (limit_entry - sl) * rr
+                            else:
+                                tp = limit_entry - (sl - limit_entry) * rr
+                            signal["signal_close"] = signal["entry"]  # keep original for reference
+                            signal["entry"] = limit_entry
+                            signal["tp"] = float(tp)
+                            signal["entry_type"] = "limit"
+                        else:
+                            signal["entry_type"] = "market"
+
                         qty = calculate_qty(signal["entry"], signal["sl"])
                         signal["qty"] = qty
                         results.append({"symbol": symbol, **signal})
@@ -113,11 +174,13 @@ async def scan():
             top_signals = results[:3]
 
             for trade in top_signals:
-                if len([t for t in get_open_trades() if t.get("status") == "OPEN"]) >= MAX_OPEN_TRADES:
+                if count_active_trades() >= MAX_OPEN_TRADES:
                     break
 
                 trade_no = next_trade_number()
                 balance = get_balance()["balance"]
+
+                is_limit = trade.get("entry_type") == "limit"
 
                 # FIX: previously this rebuilt a trimmed whitelist dict here,
                 # which silently dropped sweep/fvg/volume_spike/displacement,
@@ -135,8 +198,11 @@ async def scan():
                     "sl": float(trade["sl"]),
                     "tp": float(trade["tp"]),
                     "qty": float(trade["qty"]),
-                    "status": "OPEN",
+                    # Limit orders rest as PENDING until the monitor confirms
+                    # the fill (or expires them); market entries open now.
+                    "status": "PENDING" if is_limit else "OPEN",
                     "trade_no": trade_no,
+                    "placed_at": datetime.now(timezone.utc).isoformat(),
                 }
 
                 # Portfolio-level risk gate: even if we're under MAX_OPEN_TRADES,
@@ -154,9 +220,15 @@ async def scan():
                         logger.error(f"❌ Failed to execute: {trade['symbol']}")
                         continue
 
-                    logger.info(f"✅ Live trade executed: {trade['symbol']}")
+                    # Keep the exchange order id so the monitor can track the
+                    # resting limit order's fill/cancel state.
+                    order_id = (order.get("result") or {}).get("orderId")
+                    if order_id:
+                        trade_data["order_id"] = order_id
+
+                    logger.info(f"✅ Live {'limit order placed' if is_limit else 'trade executed'}: {trade['symbol']}")
                 else:
-                    logger.info(f"📝 Paper Trade Opened: {trade['symbol']}")
+                    logger.info(f"📝 Paper {'limit order placed' if is_limit else 'trade opened'}: {trade['symbol']}")
 
                 add_trade(trade_data)
 
@@ -164,7 +236,10 @@ async def scan():
                 if trade.get("signal_hash"):
                     save_signal_hash(trade["signal_hash"])
 
-                await send_alert(format_open_alert(trade_data))
+                if is_limit:
+                    await send_alert(format_limit_alert(trade_data, LIMIT_TTL_MINUTES))
+                else:
+                    await send_alert(format_open_alert(trade_data))
 
         except Exception as e:
             logger.exception(f"SCAN FAILED: {e}")
@@ -211,8 +286,26 @@ def retrain_model():
         logger.exception(f"MODEL RETRAIN FAILED: {e}")
 
 
-def run_scan_sync():
+# Tracks which 5m candle we last scanned, so scans fire once per candle CLOSE
+# (within ~20s of it) instead of every 5 minutes from whenever the process
+# happened to boot. With the forming candle dropped in the scanner, this means
+# each scan evaluates the freshly-closed candle almost immediately, instead of
+# up to 5 minutes late.
+_last_scanned_bucket = None
+
+
+def _current_candle_bucket():
+    now = datetime.now(timezone.utc)
+    return now.replace(minute=now.minute - now.minute % 5, second=0, microsecond=0)
+
+
+def run_scan_sync(force=False):
+    global _last_scanned_bucket
     try:
+        bucket = _current_candle_bucket()
+        if not force and bucket == _last_scanned_bucket:
+            return  # this candle was already scanned
+        _last_scanned_bucket = bucket
         asyncio.run(scan())
     except Exception as e:
         logger.exception(f"Scan wrapper error: {e}")
@@ -254,13 +347,15 @@ def main():
     logger.info("🕒 Session bonus system enabled")
 
     asyncio.run(startup())
-    run_scan_sync()
+    run_scan_sync(force=True)
     run_monitor_sync()
     retrain_model()
 
     schedule.every(1).minutes.do(heartbeat)
     schedule.every(35).seconds.do(run_monitor_sync)
-    schedule.every(5).minutes.do(run_scan_sync)
+    # Checked every 20s but only fires once per NEW closed 5m candle — i.e.
+    # candle-aligned scanning with <=20s latency after each close.
+    schedule.every(20).seconds.do(run_scan_sync)
     schedule.every(10).minutes.do(retrain_model)
     schedule.every(2).minutes.do(run_reconcile_sync)
     schedule.every().day.at("00:00").do(daily_reset)

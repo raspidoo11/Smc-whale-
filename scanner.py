@@ -177,10 +177,18 @@ def get_ohlcv(symbol, timeframe, limit):
             ohlcv,
             columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
         )
-        
+
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df = df.set_index('timestamp')
-        
+
+        # CRITICAL: ccxt returns the currently-FORMING candle as the last row.
+        # Every signal computed on it (volume spike vs full-candle averages,
+        # displacement on a partial body, close>open mid-candle) can flip by
+        # candle close — i.e. the signal repaints. Dropping it here means the
+        # whole pipeline only ever sees CLOSED candles, matching how the
+        # backtester and the Pine script evaluate.
+        df = df.iloc[:-1]
+
         df = df[(df['volume'] > 0) & (df['close'] > 0)]
         
         if len(df) < limit * 0.8:

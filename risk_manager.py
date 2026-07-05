@@ -54,12 +54,17 @@ def trade_risk_usd(trade):
         return 0.0
 
 
+# A resting limit order (PENDING) is committed risk the moment it can fill, so
+# every cap below treats it exactly like an open position.
+ACTIVE_STATUSES = ("OPEN", "PENDING")
+
+
 def portfolio_risk_usd(open_trades):
-    return sum(trade_risk_usd(t) for t in open_trades if t.get("status") == "OPEN")
+    return sum(trade_risk_usd(t) for t in open_trades if t.get("status") in ACTIVE_STATUSES)
 
 
 def can_open_trade(new_trade, open_trades, balance):
-    open_now = [t for t in open_trades if t.get("status") == "OPEN"]
+    open_now = [t for t in open_trades if t.get("status") in ACTIVE_STATUSES]
 
     symbol = new_trade.get("symbol")
     if any(t.get("symbol") == symbol for t in open_now):

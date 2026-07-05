@@ -155,13 +155,22 @@ async def execute_trade(signal):
 
         side = "Buy" if direction == "LONG" else "Sell"
 
+        # Limit entries: rest at the retracement level instead of chasing the
+        # displacement candle's close at market. signal["entry"] already holds
+        # the limit price when the caller runs in limit mode.
+        is_limit = signal.get("entry_type") == "limit"
+
         params = {
             "category": "linear",
             "symbol": symbol,
             "side": side,
-            "orderType": "Market",
+            "orderType": "Limit" if is_limit else "Market",
             "qty": str(qty),
         }
+
+        if is_limit:
+            params["price"] = str(entry)
+            params["timeInForce"] = "GTC"
 
         if sl:
             params["stopLoss"] = str(sl)
@@ -191,6 +200,43 @@ async def execute_trade(signal):
     except Exception as e:
         logger.exception(f"❌ Trade execution failed: {e}")
         return None
+
+
+def get_order_status(symbol, order_id):
+    """Return Bybit's order status string ("New", "PartiallyFilled", "Filled",
+    "Cancelled", ...) for a limit order, or None if it can't be determined.
+    Checks realtime open orders first, then order history for terminal states."""
+    client = get_trade_client()
+    sym = _pybit_symbol(symbol)
+    try:
+        resp = client.get_open_orders(category=CATEGORY, symbol=sym, orderId=order_id)
+        rows = resp.get("result", {}).get("list", [])
+        if rows:
+            return rows[0].get("orderStatus")
+        resp = client.get_order_history(category=CATEGORY, symbol=sym, orderId=order_id, limit=1)
+        rows = resp.get("result", {}).get("list", [])
+        if rows:
+            return rows[0].get("orderStatus")
+        return None
+    except Exception as e:
+        logger.error(f"Failed to fetch order status for {sym}/{order_id}: {e}")
+        return None
+
+
+def cancel_order(symbol, order_id):
+    """Cancel a resting limit order. Treats 'order not exists or too late'
+    (already filled/cancelled) as success — the monitor re-checks status."""
+    client = get_trade_client()
+    sym = _pybit_symbol(symbol)
+    try:
+        client.cancel_order(category=CATEGORY, symbol=sym, orderId=order_id)
+        logger.info(f"🚫 Cancelled limit order {order_id} on {sym}")
+        return True
+    except Exception as e:
+        if "110001" in str(e) or "not exists" in str(e).lower():
+            return True
+        logger.error(f"Failed to cancel order {order_id} on {sym}: {e}")
+        return False
 
 
 def get_open_position_size(symbol):

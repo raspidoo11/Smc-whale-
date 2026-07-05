@@ -24,7 +24,14 @@ import numpy as np
 import pandas as pd
 
 import strategy
-from config import START_BALANCE, TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO
+from config import (
+    START_BALANCE,
+    TRAIL_PERCENT,
+    TRAIL_ACTIVATION_RATIO,
+    ENTRY_MODE,
+    LIMIT_TTL_MINUTES,
+    SLIPPAGE_PCT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +39,20 @@ FEE_RATE = 0.0004          # taker fee per side
 RISK_FRACTION = 0.05       # fraction of running equity risked per trade
 WARMUP = 60                # bars of context before the first possible signal
 WINDOW = 250               # rolling df length handed to get_signal
+LIMIT_TTL_BARS = max(1, int(LIMIT_TTL_MINUTES / 5))  # 5m bars per resting order
+
+
+def _simulate_limit_fill(direction, limit_price, highs, lows, ttl_bars):
+    """Walk forward up to ttl_bars looking for price to trade through the
+    resting limit level. Returns the 0-based bar offset of the fill, or None
+    if the order expires unfilled (the runner left without us — the accepted
+    cost of retrace entries)."""
+    for k in range(min(ttl_bars, len(highs))):
+        if direction == "LONG" and lows[k] <= limit_price:
+            return k
+        if direction == "SHORT" and highs[k] >= limit_price:
+            return k
+    return None
 
 
 def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, activation_ratio):
@@ -94,6 +115,7 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
     equity = float(START_BALANCE)
     equity_curve = [equity]
     trades = []
+    unfilled = 0  # limit orders that expired without a fill
 
     highs = df_5m["high"].to_numpy()
     lows = df_5m["low"].to_numpy()
@@ -120,10 +142,30 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
                 i += 1
                 continue
 
-            entry = float(signal["entry"])
-            sl = float(signal["sl"])
-            tp = float(signal["tp"])
             direction = signal["direction"]
+            sl = float(signal["sl"])
+            slip = SLIPPAGE_PCT / 100
+            fill_offset = 0  # bars between signal and actual entry
+
+            if ENTRY_MODE == "limit":
+                # Mirror live behavior: rest at the retrace level, wait for a
+                # touch, expire unfilled orders after the TTL. Limit fills get
+                # NO adverse slippage — that's the whole point of them.
+                entry = float(signal.get("limit_price", signal["entry"]))
+                rr = float(signal.get("rr_multiplier", 1.5))
+                tp = entry + (entry - sl) * rr if direction == "LONG" else entry - (sl - entry) * rr
+                touched = _simulate_limit_fill(
+                    direction, entry, highs[i + 1:], lows[i + 1:], LIMIT_TTL_BARS
+                )
+                if touched is None:
+                    unfilled += 1
+                    i += 1
+                    continue
+                fill_offset = touched
+            else:
+                # Market entry at the signal close, with adverse slippage.
+                entry = float(signal["entry"]) * (1 + slip if direction == "LONG" else 1 - slip)
+                tp = float(signal["tp"])
 
             risk_usd = equity * RISK_FRACTION
             per_unit = abs(entry - sl)
@@ -132,13 +174,20 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
                 continue
             qty = risk_usd / per_unit
 
+            # Exit walk starts at the fill bar itself (a limit fill and an SL
+            # breach can share a candle — conservatively, SL wins).
+            start = i + 1 + fill_offset
             exit_price, reason, bars_held = _simulate_exit(
                 direction, entry, sl, tp,
-                highs[i + 1:], lows[i + 1:], closes[i + 1:],
+                highs[start:], lows[start:], closes[start:],
                 TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO,
             )
             if exit_price is None:
                 break
+            bars_held += fill_offset
+
+            # Stop-outs and trailing exits leave at market -> adverse slippage.
+            exit_price = exit_price * (1 - slip if direction == "LONG" else 1 + slip)
 
             gross = (exit_price - entry) * qty if direction == "LONG" else (entry - exit_price) * qty
             fees = (entry * qty + exit_price * qty) * FEE_RATE
@@ -152,6 +201,11 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
             closed = {
                 **signal,
                 "symbol": symbol,
+                # Override with the ACTUAL fill economics (limit entry price /
+                # recomputed TP), not the signal-close values from **signal —
+                # realized_r and any later training on this record depend on it.
+                "entry": entry,
+                "tp": tp,
                 "status": status,
                 "exit_price": exit_price,
                 "exit_reason": reason,
@@ -173,6 +227,7 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False):
         strategy.USE_XGBOOST = orig_xgb
 
     metrics = compute_metrics(trades, equity_curve)
+    metrics["unfilled_limit_orders"] = unfilled
     return trades, metrics
 
 

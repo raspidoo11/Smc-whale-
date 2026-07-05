@@ -176,6 +176,19 @@ def extract_pro_features_from_trade(trade, historical_context=None, regime="rang
         features["cumulative_pnl"] = 0
         features["current_dd_pct"] = 0
 
+    # Market-context features (persisted on the signal by strategy.py; all
+    # None-safe so pre-upgrade history rows simply read as neutral).
+    is_long = 1 if trade.get("direction") == "LONG" else -1
+    features["funding_rate"] = float(trade.get("funding_rate") or 0.0)
+    features["oi_change_pct"] = float(trade.get("oi_change_pct") or 0.0)
+    features["btc_trend"] = float(trade.get("btc_trend") or 0.0)
+    features["spread_pct"] = float(trade.get("spread_pct") or 0.0)
+    features["symbol_win_rate"] = float(trade.get("symbol_win_rate") or 0.5)
+    # Trading WITH BTC's structure vs against it — alts rarely win that fight.
+    features["btc_aligned"] = 1 if features["btc_trend"] * is_long > 0 else 0
+    # Positive funding on a long = paying to join the crowded side.
+    features["funding_vs_direction"] = features["funding_rate"] * is_long
+
     features["volume_x_displacement"] = trade.get("volume_spike", 0) * trade.get("displacement", 0)
     features["sweep_x_fvg"] = trade.get("sweep", 0) * trade.get("fvg", 0)
     features["volatility_x_risk"] = atr * features["risk_pct"]

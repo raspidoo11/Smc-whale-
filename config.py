@@ -64,6 +64,40 @@ TRAIL_ACTIVATION_RATIO = float(os.getenv("TRAIL_ACTIVATION_RATIO", 0.97))
 TRAIL_PERCENT = float(os.getenv("TRAIL_PERCENT", 0.5))
 
 # ==========================================================
+# Entry execution — retrace limit entries vs chase-at-market
+# ==========================================================
+# "limit"  : place a limit order at the retracement level (FVG midpoint when a
+#            fair value gap exists, else an ATR-fraction pullback) and wait for
+#            price to come back to us. Better fills, but some runners leave
+#            without filling.
+# "market" : legacy behavior — enter at the signal candle's close immediately.
+ENTRY_MODE = os.getenv("ENTRY_MODE", "limit").lower()
+# Fallback retrace depth when no FVG exists: limit = entry -/+ RETRACE_ATR_FRACTION * ATR.
+RETRACE_ATR_FRACTION = float(os.getenv("RETRACE_ATR_FRACTION", 0.35))
+# Cancel an unfilled limit order after this many minutes (6 x 5m candles).
+LIMIT_TTL_MINUTES = float(os.getenv("LIMIT_TTL_MINUTES", 30))
+
+# ==========================================================
+# Entry quality gates
+# ==========================================================
+# Skip entries when the bid-ask spread eats too much of the planned risk:
+# reject if spread > SPREAD_MAX_FRACTION_OF_RISK * |entry - sl|.
+SPREAD_MAX_FRACTION_OF_RISK = float(os.getenv("SPREAD_MAX_FRACTION_OF_RISK", 0.15))
+# Pure-SMC-mode confidence bar (AI mode uses the dynamic threshold).
+CONFIDENCE_REQUIRED_SMC = int(os.getenv("CONFIDENCE_REQUIRED_SMC", 40))
+# Pause entries around scheduled high-impact macro events (news_filter.py).
+# Off by default: the built-in calendar is approximate — enable once you've
+# reviewed/edited the event windows there.
+NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "false").lower() == "true"
+
+# ==========================================================
+# Backtest realism
+# ==========================================================
+# Adverse slippage applied to every simulated fill, as a percent of price
+# (0.02 = 2 basis points each side).
+SLIPPAGE_PCT = float(os.getenv("SLIPPAGE_PCT", 0.02))
+
+# ==========================================================
 # Scan configuration
 # ==========================================================
 SCAN_MODE = os.getenv("SCAN_MODE", "scalp")

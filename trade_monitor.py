@@ -8,10 +8,17 @@ from bybit_executor import (
     activate_trailing_stop,
     get_open_position_size,
     get_last_closed_pnl,
+    get_order_status,
+    cancel_order,
 )
 from telegram_alerts import send_alert
-from alerts import format_close_alert, format_trailing_alert
-from config import TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO
+from alerts import (
+    format_close_alert,
+    format_trailing_alert,
+    format_limit_filled_alert,
+    format_limit_cancelled_alert,
+)
+from config import TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO, LIMIT_TTL_MINUTES
 
 logger = logging.getLogger(__name__)
 exchange = get_exchange()
@@ -104,6 +111,75 @@ async def _handle_paper_trailing(trade, symbol, direction, current_price, open_t
     return False
 
 
+async def _handle_pending_order(trade, symbol, direction, current_price, open_trades):
+    """Lifecycle of a resting limit order (status == "PENDING").
+
+    Paper: fill when price trades through the limit level; expire after
+    LIMIT_TTL_MINUTES if never touched. Live: mirror Bybit's actual order
+    status, cancelling the resting order on expiry. Cancelled/expired orders
+    are removed WITHOUT touching trade history — a never-opened order must not
+    pollute training data. Returns True if the pending entry left the book
+    (filled or cancelled) so the caller persists."""
+    limit_price = float(trade.get("entry", 0))
+
+    async def _fill():
+        trade["status"] = "OPEN"
+        trade["filled_at"] = datetime.now(timezone.utc).isoformat()
+        logger.info(f"✅ Limit FILLED: {trade.get('symbol')} at {limit_price:.6f}")
+        await send_alert(format_limit_filled_alert(trade))
+
+    async def _cancel(reason):
+        open_trades.remove(trade)
+        logger.info(f"🚫 Limit cancelled ({reason}): {trade.get('symbol')}")
+        await send_alert(format_limit_cancelled_alert(trade, reason))
+
+    minutes_pending = _minutes_since(trade.get("placed_at"))
+    expired = minutes_pending is not None and minutes_pending > LIMIT_TTL_MINUTES
+
+    if not EXECUTE_TRADES:
+        touched = (
+            current_price <= limit_price
+            if direction == "LONG"
+            else current_price >= limit_price
+        )
+        if touched:
+            await _fill()
+        elif expired:
+            await _cancel(f"Not filled within {int(LIMIT_TTL_MINUTES)} min")
+        return touched or expired
+
+    # ---- Live: Bybit's order state is the truth ----
+    order_id = trade.get("order_id")
+    if not order_id:
+        await _cancel("No exchange order id recorded")
+        return True
+
+    status = get_order_status(symbol, order_id)
+
+    if status == "Filled":
+        await _fill()
+        return True
+
+    if status in ("Cancelled", "Rejected", "Deactivated"):
+        await _cancel(f"Order {status} on exchange")
+        return True
+
+    if status == "PartiallyFilled":
+        # A position already exists; let it keep filling — never expire a
+        # partially-filled order out from under an open position.
+        return False
+
+    if expired:
+        if cancel_order(symbol, order_id):
+            # Re-check: it may have filled in the race window before cancel.
+            if get_order_status(symbol, order_id) == "Filled":
+                await _fill()
+            else:
+                await _cancel(f"Not filled within {int(LIMIT_TTL_MINUTES)} min")
+            return True
+    return False
+
+
 async def monitor_trades():
     try:
         open_trades = get_open_trades()
@@ -137,6 +213,17 @@ async def monitor_trades():
                 logger.info(
                     f"{symbol} | Current={current_price:.6f} | TP={tp:.6f} | SL={sl:.6f}"
                 )
+
+                # ============================================================
+                # Resting limit order: wait for fill or expiry
+                # ============================================================
+                if trade.get("status") == "PENDING":
+                    changed = await _handle_pending_order(
+                        trade, symbol, direction, current_price, open_trades
+                    )
+                    if changed:
+                        trades_changed = True
+                    continue
 
                 # ============================================================
                 # Trailing stop already active

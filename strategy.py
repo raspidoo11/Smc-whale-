@@ -13,7 +13,11 @@ from xgboost_trainer import (
     calculate_atr_percentile,
     extract_pro_features_from_trade,
 )
-from config import MIN_EXPECTED_R
+from config import (
+    MIN_EXPECTED_R,
+    CONFIDENCE_REQUIRED_SMC,
+    RETRACE_ATR_FRACTION,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +27,12 @@ USE_XGBOOST = os.getenv("USE_XGBOOST", "false").lower() == "true"
 # this to the candle's timestamp so session/hour features reflect the bar being
 # replayed, not "now". Keeps a single get_signal() for both paths.
 NOW_FN = lambda: datetime.now(timezone.utc)
+
+# Market-context seam. main.py wires this to market_context.get_market_context
+# at startup so live signals are enriched with funding rate / open-interest
+# change / BTC trend / spread. The backtester leaves it as-is (network-free),
+# and the featurizer treats the missing values as neutral defaults.
+MARKET_CONTEXT_FN = lambda symbol: {}
 
 # Module-level set to track recent signals for cooldown (prevents duplicate alerts on same candle)
 # For multi-pair scanners, manage recent_signals per symbol (e.g. dict of sets) or include symbol in signal_hash
@@ -293,6 +303,35 @@ def get_signal(symbol, df_15m, df_5m):
         distance_to_prev_low = _rel(swing_low, entry)
 
         # ==========================================================
+        # Market context (funding / OI / BTC trend / spread) + per-symbol form
+        # ----------------------------------------------------------
+        # Only fetched once a real setup exists (trend + minimum confluence) so
+        # a 30-symbol scan doesn't triple its API calls on non-setups. Values
+        # are persisted on the signal so training sees exactly what inference
+        # saw. All None-safe: an API hiccup degrades to neutral, never blocks.
+        # ==========================================================
+
+        market_ctx = {}
+        if (trend_bull or trend_bear) and score >= 30:
+            try:
+                market_ctx = MARKET_CONTEXT_FN(symbol) or {}
+            except Exception as e:
+                logger.debug(f"market context fetch failed for {symbol}: {e}")
+
+        # Per-symbol win rate over its last 20 closed trades (0.5 = neutral /
+        # not enough data). Lets the model learn "this strategy works on SOL
+        # but not on THIS thin alt" instead of treating every pair identically.
+        symbol_closed = [
+            t for t in history
+            if t.get("symbol") == symbol and t.get("status") in ("WIN", "LOSS")
+        ][-20:]
+        symbol_win_rate = (
+            sum(1 for t in symbol_closed if t.get("status") == "WIN") / len(symbol_closed)
+            if len(symbol_closed) >= 3
+            else 0.5
+        )
+
+        # ==========================================================
         # Dynamic Stop Loss / Take Profit
         # ==========================================================
 
@@ -362,6 +401,36 @@ def get_signal(symbol, df_15m, df_5m):
             return None
 
         # ==========================================================
+        # Retrace limit entry price
+        # ----------------------------------------------------------
+        # SMC methodology enters on the RETRACEMENT into the imbalance, not by
+        # chasing the close of the displacement candle (the worst price of the
+        # move). Preferred level: the FVG midpoint when a gap exists; fallback:
+        # an ATR-fraction pullback. Clamped to stay meaningfully above the stop
+        # (>= 25% of the risk distance) and on the entry side of price.
+        # main.py uses this when ENTRY_MODE="limit"; "market" ignores it.
+        # ==========================================================
+
+        if trend_bull:
+            if bull_fvg:
+                gap_bottom = float(df_5m["high"].iloc[-3])
+                gap_top = float(df_5m["low"].iloc[-1])
+                limit_price = (gap_bottom + gap_top) / 2
+            else:
+                limit_price = entry - atr * RETRACE_ATR_FRACTION
+            limit_price = min(limit_price, entry)
+            limit_price = max(limit_price, sl + 0.25 * (entry - sl))
+        else:
+            if bear_fvg:
+                gap_top = float(df_5m["low"].iloc[-3])
+                gap_bottom = float(df_5m["high"].iloc[-1])
+                limit_price = (gap_top + gap_bottom) / 2
+            else:
+                limit_price = entry + atr * RETRACE_ATR_FRACTION
+            limit_price = max(limit_price, entry)
+            limit_price = min(limit_price, sl - 0.25 * (sl - entry))
+
+        # ==========================================================
         # Risk Metrics
         # ==========================================================
 
@@ -413,6 +482,14 @@ def get_signal(symbol, df_15m, df_5m):
             "distance_to_prev_high": distance_to_prev_high,
             "distance_to_prev_low": distance_to_prev_low,
             "risk_reward": risk_reward,
+            "rr_multiplier": rr,
+            "limit_price": float(limit_price),
+            # Market context — persisted so training sees what inference saw.
+            "funding_rate": market_ctx.get("funding_rate"),
+            "oi_change_pct": market_ctx.get("oi_change_pct"),
+            "btc_trend": market_ctx.get("btc_trend"),
+            "spread_pct": market_ctx.get("spread_pct"),
+            "symbol_win_rate": float(symbol_win_rate),
         }
 
         # ==========================================================
@@ -467,7 +544,7 @@ def get_signal(symbol, df_15m, df_5m):
             # Generate more trades for AI training
             final_confidence = score
 
-            confidence_required = 40
+            confidence_required = CONFIDENCE_REQUIRED_SMC
 
         # Confidence Bonus: reward setups with multiple confluences
         if (bull_sweep and bull_fvg) or (bear_sweep and bear_fvg):

@@ -76,6 +76,52 @@ def format_close_alert(trade, exit_price, exit_reason, pnl, balance):
     )
 
 
+def format_limit_alert(trade, ttl_minutes):
+    n = trade.get("trade_no", "?")
+    conf = trade.get("confidence", "?")
+    ai = trade.get("ai_prob")
+    ai_line = f"\n🤖 <b>AI Prob:</b> <code>{float(ai):.1f}%</code>" if ai is not None else ""
+    return (
+        f"⏳ <b>SIGNAL #{n} — LIMIT ORDER PLACED</b>\n"
+        f"{BAR}\n"
+        f"🪙 <b>{trade.get('symbol')}</b>   {_dir_badge(trade.get('direction'))}\n\n"
+        f"📌 <b>Limit:</b> <code>{float(trade.get('entry', 0)):.6f}</code>  (waiting for retrace)\n"
+        f"🛑 <b>Stop:</b> <code>{float(trade.get('sl', 0)):.6f}</code>\n"
+        f"🎯 <b>Target:</b> <code>{float(trade.get('tp', 0)):.6f}</code>\n"
+        f"📦 <b>Qty:</b> <code>{float(trade.get('qty', 0)):.4f}</code>\n"
+        f"🔥 <b>Confidence:</b> <code>{conf}%</code>"
+        f"{ai_line}\n"
+        f"⏱️ <b>Expires in:</b> {int(ttl_minutes)} min if unfilled\n"
+        f"{BAR}"
+    )
+
+
+def format_limit_filled_alert(trade):
+    n = trade.get("trade_no", "?")
+    return (
+        f"✅ <b>TRADE #{n} — LIMIT FILLED, POSITION OPEN</b>\n"
+        f"{BAR}\n"
+        f"🪙 <b>{trade.get('symbol')}</b>   {_dir_badge(trade.get('direction'))}\n\n"
+        f"💵 <b>Filled at:</b> <code>{float(trade.get('entry', 0)):.6f}</code>\n"
+        f"🛑 <b>Stop:</b> <code>{float(trade.get('sl', 0)):.6f}</code>\n"
+        f"🎯 <b>Target:</b> <code>{float(trade.get('tp', 0)):.6f}</code>\n"
+        f"📦 <b>Qty:</b> <code>{float(trade.get('qty', 0)):.4f}</code>\n"
+        f"{BAR}"
+    )
+
+
+def format_limit_cancelled_alert(trade, reason):
+    n = trade.get("trade_no", "?")
+    return (
+        f"🚫 <b>SIGNAL #{n} — LIMIT ORDER CANCELLED</b>\n"
+        f"{BAR}\n"
+        f"🪙 <b>{trade.get('symbol')}</b>   {_dir_badge(trade.get('direction'))}\n"
+        f"📌 <b>Limit was:</b> <code>{float(trade.get('entry', 0)):.6f}</code>\n"
+        f"📍 <b>Reason:</b> {reason}\n"
+        f"{BAR}"
+    )
+
+
 def format_trailing_alert(trade, current_price, trail_percent):
     n = trade.get("trade_no", "?")
     return (

@@ -96,6 +96,13 @@ Copy `.env.example` → `.env`. Environment variables:
 | `MIN_EXPECTED_R` | `0.0` | Min model-expected R to accept a trade (AI mode) |
 | `TRAIL_ACTIVATION_RATIO` | `0.97` | Fraction of entry→TP at which TP is cancelled and trailing arms |
 | `TRAIL_PERCENT` | `0.5` | Trailing distance as % of price |
+| `ENTRY_MODE` | `limit` | `limit` = retrace limit entries (FVG midpoint / ATR pullback); `market` = legacy chase-at-close |
+| `LIMIT_TTL_MINUTES` | `30` | Cancel an unfilled limit order after this long |
+| `RETRACE_ATR_FRACTION` | `0.35` | Fallback retrace depth (×ATR) when no FVG exists |
+| `SPREAD_MAX_FRACTION_OF_RISK` | `0.15` | Skip entry if bid-ask spread eats more of the risk than this |
+| `CONFIDENCE_REQUIRED_SMC` | `40` | Confidence bar in pure-SMC mode (AI mode adapts dynamically) |
+| `NEWS_FILTER_ENABLED` | `false` | Pause entries in high-impact macro windows (edit news_filter.py first) |
+| `SLIPPAGE_PCT` | `0.02` | Adverse slippage per side in backtests |
 | `STORAGE_BACKEND` | `sqlite` | `sqlite` (auto-migrates JSON) or `json` |
 | `DATA_DIR` | `data` | State/model root (Railway volume: `/app/data`) |
 
@@ -136,6 +143,32 @@ python backtester.py "ETH/USDT:USDT" --candles 5000 --xgboost
 
 Reports win rate, profit factor, expectancy, avg R, max drawdown, and Sharpe.
 The simulation core (`backtester.simulate`) is pure/offline and unit-tested.
+Fills model adverse slippage (`SLIPPAGE_PCT`) and, in limit mode, resting-order
+fills/expiries — so backtest numbers track what the live bot would experience.
+
+Tune the hand-picked thresholds empirically with the optimizer:
+
+```bash
+python optimize.py "BTC/USDT:USDT" "ETH/USDT:USDT" --candles 3000
+```
+
+It grid-searches confidence bar, retrace depth, and trailing parameters across
+both entry modes and prints the best combination as ready-to-set env vars.
+
+## Precision entries
+
+- **Closed candles only** — the scanner drops the currently-forming candle, so
+  signals can't repaint; scans fire within ~20s of each 5m candle close.
+- **Retrace limit entries** (`ENTRY_MODE=limit`, default) — instead of chasing
+  the displacement candle's close, a limit order rests at the FVG midpoint (or
+  an ATR-fraction pullback) as a `PENDING` trade. Telegram alerts fire on
+  placement, fill, and expiry; unfilled orders cancel after `LIMIT_TTL_MINUTES`
+  and never pollute training history.
+- **Spread gate** — entries are skipped when the bid-ask spread eats more than
+  `SPREAD_MAX_FRACTION_OF_RISK` of the planned stop distance.
+- **Market-context features** — signals are enriched with funding rate,
+  open-interest change, BTC 15m structure, spread, and per-symbol win rate;
+  all persisted for training so the model sees exactly what inference saw.
 
 ## Portfolio risk & reconciliation
 
