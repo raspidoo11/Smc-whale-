@@ -57,6 +57,13 @@ internalConfirm   = input.int(1, "Internal BOS Confirm Candles", group = "Struct
 displacementATR = input.float(0.50, "Displacement ATR Multiplier", group = "Structure")
 confidenceRequired = input.int(40, "Minimum Confidence To Signal", group = "Structure")
 
+// Mirror of the Python bot's ENTRY_MODE. "Limit (retrace)" draws the resting
+// limit level the bot would place (FVG midpoint when a gap exists, else an
+// ATR-fraction pullback) with TP re-derived from that entry; "Market (close)"
+// is the legacy chase-at-close view.
+entryMode  = input.string("Limit (retrace)", "Entry Mode", options = ["Limit (retrace)", "Market (close)"], group = "Structure")
+retraceATR = input.float(0.35, "Retrace Depth (xATR, no-FVG fallback)", group = "Structure", step = 0.05)
+
 pdLookback    = input.int(50, "Premium/Discount Range Lookback", group = "Premium/Discount")
 pivotBars     = input.int(3, "Pivot Bars (Equal Highs/Lows)", group = "Liquidity")
 eqTolerancePct = input.float(0.05, "Equal High/Low Tolerance %", group = "Liquidity") / 100
@@ -130,15 +137,20 @@ f_entry_core(dispMult) =>
     bullFvg = low > high[2]
     bearFvg = high < low[2]
 
+    // FVG midpoints — the preferred resting-limit level when a gap exists
+    // (matches strategy.py: midpoint of the gap between high[-3] and low[-1]).
+    bullFvgMid = (high[2] + low) / 2
+    bearFvgMid = (low[2] + high) / 2
+
     // Market regime, mirroring strategy.py / xgboost_trainer.detect_market_regime():
     // volatile if ATR > avg*1.4, else trending if 30-bar price move > 4%, else ranging.
     // 2 = volatile, 1 = trending, 0 = ranging.
     priceChange = na(close[30]) ? 0.0 : math.abs(close - close[30]) / close[30]
     regimeCode = atrVal > atrAvgLocal * 1.4 ? 2 : priceChange > 0.04 ? 1 : 0
 
-    [volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, atrVal, atrAvgLocal, regimeCode]
+    [volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, atrVal, atrAvgLocal, regimeCode, bullFvgMid, bearFvgMid]
 
-[volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, entryATR, entryATRAvg, regimeCode] =
+[volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, entryATR, entryATRAvg, regimeCode, bullFvgMid, bearFvgMid] =
      request.security(syminfo.tickerid, entryTF, f_entry_core(displacementATR))
 
 // Second entry-TF helper: order block anchor candle + SL/TP swing levels
@@ -181,8 +193,13 @@ confidence := math.max(0, math.min(confidence, 100))
 longSignal  = trendBull and confidence >= confidenceRequired
 shortSignal = trendBear and confidence >= confidenceRequired
 
-newLong  = longSignal and not longSignal[1]
-newShort = shortSignal and not shortSignal[1]
+// Anti-repaint: only act on CONFIRMED bars. Without this, the developing
+// candle can flash a BUY/SELL intra-bar that vanishes by the close — the
+// same forming-candle bug that was fixed in the Python scanner (which now
+// drops the in-progress candle entirely). Historical bars are always
+// confirmed, so backtested markers are unchanged.
+newLong  = longSignal and not longSignal[1] and barstate.isconfirmed
+newShort = shortSignal and not shortSignal[1] and barstate.isconfirmed
 
 //====================================================
 // PART 2 -- SIGNAL LABELS
@@ -400,25 +417,46 @@ longTP  = close + (close - longSL) * rrValue
 shortSL = math.max(swingHigh8 * 1.0005, close + entryATR * slMult)
 shortTP = close - (shortSL - close) * rrValue
 
+// Retrace limit entry — mirrors strategy.py: rest at the FVG midpoint when a
+// gap exists, else an ATR-fraction pullback; clamped on the entry side of
+// price and >= 25% of the risk distance above/below the stop. TP is
+// re-derived from the limit entry so the drawn R:R matches the bot's actual
+// fill economics, not the chase-at-close ones.
+useLimit = entryMode == "Limit (retrace)"
+
+longLimitRaw  = bullFvg ? bullFvgMid : close - entryATR * retraceATR
+longLimit     = math.max(math.min(longLimitRaw, close), longSL + 0.25 * (close - longSL))
+shortLimitRaw = bearFvg ? bearFvgMid : close + entryATR * retraceATR
+shortLimit    = math.min(math.max(shortLimitRaw, close), shortSL - 0.25 * (shortSL - close))
+
+longEntryLvl  = useLimit ? longLimit : close
+longTPLvl     = useLimit ? longEntryLvl + (longEntryLvl - longSL) * rrValue : longTP
+shortEntryLvl = useLimit ? shortLimit : close
+shortTPLvl    = useLimit ? shortEntryLvl - (shortSL - shortEntryLvl) * rrValue : shortTP
+
+entryTagText = useLimit ? "LIMIT" : "ENTRY"
+
 if showLevels and newLong
-    line.new(bar_index, close, bar_index + 30, close, color = color.new(color.blue, 0), style = line.style_dashed)
+    line.new(bar_index, longEntryLvl, bar_index + 30, longEntryLvl, color = color.new(color.blue, 0), style = line.style_dashed)
     line.new(bar_index, longSL, bar_index + 30, longSL, color = bearColor, style = line.style_dashed)
-    line.new(bar_index, longTP, bar_index + 30, longTP, color = bullColor, style = line.style_dashed)
-    label.new(bar_index + 30, longTP, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
+    line.new(bar_index, longTPLvl, bar_index + 30, longTPLvl, color = bullColor, style = line.style_dashed)
+    label.new(bar_index + 30, longTPLvl, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
     label.new(bar_index + 30, longSL, "SL", style = label.style_label_left, color = color.new(bearColor, 80), textcolor = bearColor, size = size.tiny)
+    label.new(bar_index + 30, longEntryLvl, entryTagText, style = label.style_label_left, color = color.new(color.blue, 80), textcolor = color.new(color.blue, 0), size = size.tiny)
 
 if showLevels and newShort
-    line.new(bar_index, close, bar_index + 30, close, color = color.new(color.blue, 0), style = line.style_dashed)
+    line.new(bar_index, shortEntryLvl, bar_index + 30, shortEntryLvl, color = color.new(color.blue, 0), style = line.style_dashed)
     line.new(bar_index, shortSL, bar_index + 30, shortSL, color = bearColor, style = line.style_dashed)
-    line.new(bar_index, shortTP, bar_index + 30, shortTP, color = bullColor, style = line.style_dashed)
-    label.new(bar_index + 30, shortTP, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
+    line.new(bar_index, shortTPLvl, bar_index + 30, shortTPLvl, color = bullColor, style = line.style_dashed)
+    label.new(bar_index + 30, shortTPLvl, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
     label.new(bar_index + 30, shortSL, "SL", style = label.style_label_left, color = color.new(bearColor, 80), textcolor = bearColor, size = size.tiny)
+    label.new(bar_index + 30, shortEntryLvl, entryTagText, style = label.style_label_left, color = color.new(color.blue, 80), textcolor = color.new(color.blue, 0), size = size.tiny)
 
 //====================================================
 // PART 3 -- DASHBOARD
 //====================================================
 
-var table dash = table.new(position.top_right, 2, 11, border_width = 1, border_color = color.new(color.blue, 50))
+var table dash = table.new(position.top_right, 2, 12, border_width = 1, border_color = color.new(color.blue, 50))
 
 // Dashboard text color. Was white/gray, which is invisible on light chart
 // themes -- switched to a readable blue. Direction/severity is still conveyed
@@ -468,6 +506,9 @@ if barstate.islast and showDashboard
 
     table.cell(dash, 0, 10, "Mode", text_color = dashText, text_size = size.small)
     table.cell(dash, 1, 10, tradeMode + "  " + f_tfLabel(trendTF) + " / " + f_tfLabel(entryTF), text_color = dashText, text_size = size.small)
+
+    table.cell(dash, 0, 11, "Entry", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 11, useLimit ? "📌 Limit (retrace)" : "⚡ Market (close)", text_color = dashText, text_size = size.small)
 
 //====================================================
 // PART 3 -- CHART TIMEFRAME GUARD
