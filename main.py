@@ -34,7 +34,7 @@ from config import (
     NEWS_FILTER_ENABLED,
 )
 from alerts import format_open_alert, format_limit_alert
-from risk_manager import can_open_trade
+from risk_manager import can_open_trade, blocked_session_now
 from reconcile import reconcile
 from market_context import get_market_context
 from news_filter import get_news_status
@@ -103,6 +103,11 @@ async def scan():
                 if paused:
                     logger.info(f"📰 Entries paused: {news_reason}")
                     return
+
+            blocked = blocked_session_now()
+            if blocked:
+                logger.info(f"🌙 {blocked} session is blocked (BLOCKED_SESSIONS) — no new entries")
+                return
 
             if count_active_trades() >= MAX_OPEN_TRADES:
                 logger.info(f"📉 Max open+pending trades ({MAX_OPEN_TRADES}) reached. Skipping scan.")

@@ -102,6 +102,7 @@ Copy `.env.example` → `.env`. Environment variables:
 | `SPREAD_MAX_FRACTION_OF_RISK` | `0.15` | Skip entry if bid-ask spread eats more of the risk than this |
 | `CONFIDENCE_REQUIRED_SMC` | `40` | Confidence bar in pure-SMC mode (AI mode adapts dynamically) |
 | `NEWS_FILTER_ENABLED` | `false` | Pause entries in high-impact macro windows (edit news_filter.py first) |
+| `BLOCKED_SESSIONS` | *(none)* | UTC sessions with no new entries, e.g. `asian` or `london,quiet` (valid: asian/london/ny/quiet) |
 | `SLIPPAGE_PCT` | `0.02` | Adverse slippage per side in backtests |
 | `STORAGE_BACKEND` | `sqlite` | `sqlite` (auto-migrates JSON) or `json` |
 | `DATA_DIR` | `data` | State/model root (Railway volume: `/app/data`) |

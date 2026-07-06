@@ -99,6 +99,26 @@ CONFIDENCE_REQUIRED_SMC = int(os.getenv("CONFIDENCE_REQUIRED_SMC", 40))
 # reviewed/edited the event windows there.
 NEWS_FILTER_ENABLED = os.getenv("NEWS_FILTER_ENABLED", "false").lower() == "true"
 
+# Sessions (UTC) in which NO NEW entries are taken — open positions keep being
+# managed normally. Comma-separated. Valid names and their UTC windows:
+#   asian  = 22:00-06:59 · london = 07:00-11:59 · ny = 12:00-16:59 ·
+#   quiet  = 17:00-21:59
+# Example: BLOCKED_SESSIONS=asian,quiet
+_VALID_SESSIONS = {"asian", "london", "ny", "quiet"}
+BLOCKED_SESSIONS = {
+    s.strip().lower()
+    for s in os.getenv("BLOCKED_SESSIONS", "").split(",")
+    if s.strip()
+}
+_bad_sessions = BLOCKED_SESSIONS - _VALID_SESSIONS
+if _bad_sessions:
+    # Fail LOUDLY: a silently-ignored env var is how "I turned it off but it
+    # kept trading" happens.
+    raise ValueError(
+        f"BLOCKED_SESSIONS contains unknown session(s) {sorted(_bad_sessions)}; "
+        f"valid: {sorted(_VALID_SESSIONS)}"
+    )
+
 # ==========================================================
 # Backtest realism
 # ==========================================================

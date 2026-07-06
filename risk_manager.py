@@ -15,14 +15,39 @@ exactly why a candidate was rejected.
 """
 
 import logging
+from datetime import datetime, timezone
 
 from config import (
     MAX_PORTFOLIO_RISK_PCT,
     MAX_TRADES_PER_DIRECTION,
     MAX_ALT_POSITIONS,
+    BLOCKED_SESSIONS,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def session_for_hour(hour):
+    """UTC hour -> session bucket. Same bins as the strategy's session
+    features and the trainer's diagnostics, so a blocked session lines up
+    exactly with what the model/reports call that session."""
+    if 7 <= hour <= 11:
+        return "london"
+    if 12 <= hour <= 16:
+        return "ny"
+    if 17 <= hour <= 21:
+        return "quiet"
+    return "asian"
+
+
+def blocked_session_now(now=None):
+    """Name of the current UTC session if it's in BLOCKED_SESSIONS, else None.
+    Only gates NEW entries — open positions are always managed to completion."""
+    if not BLOCKED_SESSIONS:
+        return None
+    now = now or datetime.now(timezone.utc)
+    session = session_for_hour(now.hour)
+    return session if session in BLOCKED_SESSIONS else None
 
 # Liquid majors are treated as low-correlation anchors; everything else counts
 # toward the alt-concentration cap.
