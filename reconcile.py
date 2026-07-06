@@ -31,6 +31,19 @@ from alerts import format_close_alert
 logger = logging.getLogger(__name__)
 
 
+def _fallback_pnl(trade, exit_price):
+    """Compute PnL from our own trade record when Bybit's closed-PnL endpoint
+    returns nothing in time. Previously that case fell back to 0.0, so the
+    close alert showed 'LOSS +0.00 USDT' no matter the real outcome — the
+    W/L and profit weren't missing from the alert, they were being fed a
+    zero. Approximate (no fee detail), but correct in sign and magnitude."""
+    entry = float(trade.get("entry") or 0)
+    qty = float(trade.get("qty") or 0)
+    direction = str(trade.get("direction", "LONG")).upper()
+    move = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
+    return round(move * qty, 4)
+
+
 async def reconcile_positions():
     if not EXECUTE_TRADES:
         return
@@ -50,15 +63,22 @@ async def reconcile_positions():
             continue  # still open on the exchange
 
         # Position is gone on Bybit but still OPEN locally -> it closed
-        # exchange-side. Pull the real exit price + realized PnL.
+        # exchange-side. Pull the real exit price + realized PnL; if the
+        # closed-PnL endpoint has nothing yet, compute PnL from our own
+        # record so the alert and history NEVER carry a blank/zero result.
         info = get_last_closed_pnl(trade.get("symbol", "")) or {}
         exit_price = info.get("exit_price") or float(trade.get("tp") or trade.get("entry") or 0)
         realized = info.get("realized_pnl")
-        status = "WIN" if (realized is not None and realized > 0) else "LOSS"
+        approx = realized is None
+        if approx:
+            realized = _fallback_pnl(trade, exit_price)
+        realized = float(realized)
+        status = "WIN" if realized > 0 else "LOSS"
 
         logger.info(
             f"🔄 Reconcile: {sym} closed exchange-side "
-            f"(exit~{exit_price:.6f}, pnl={realized}); recording locally"
+            f"(exit~{exit_price:.6f}, {status} pnl={realized:+.2f}"
+            f"{' approx' if approx else ''}); recording locally"
         )
 
         close_trade(
@@ -66,8 +86,9 @@ async def reconcile_positions():
             exit_price,
             status,
             extra_fields={
-                "pnl": round(float(realized), 2) if realized is not None else None,
-                "exit_reason": "Reconciled (closed on exchange)",
+                "pnl": round(realized, 2),
+                "exit_reason": "Closed on exchange (SL/TP)"
+                               + (" · approx PnL" if approx else ""),
             },
         )
 
@@ -77,8 +98,8 @@ async def reconcile_positions():
                 format_close_alert(
                     {**trade, "exit_fee": 0},
                     exit_price,
-                    "Reconciled (closed on exchange)",
-                    float(realized) if realized is not None else 0.0,
+                    "Closed on exchange (SL/TP)",
+                    realized,
                     balance,
                 )
             )
@@ -100,9 +121,12 @@ def reconcile_balance():
 
 
 async def reconcile():
-    """Run a full reconciliation pass (positions then balance)."""
+    """Run a full reconciliation pass. Balance FIRST: wallet equity already
+    reflects any exchange-side closes, so syncing it before recording those
+    closes means the close alert's 'Balance' line shows the fresh number
+    instead of the stale pre-close one."""
     try:
-        await reconcile_positions()
         reconcile_balance()
+        await reconcile_positions()
     except Exception as e:
         logger.exception(f"Reconcile failed: {e}")
