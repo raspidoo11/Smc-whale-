@@ -59,6 +59,13 @@ MIN_EXPECTED_R = float(os.getenv("MIN_EXPECTED_R", 0.0))
 # training on meaningful wins keeps it from learning to predict fee-noise.
 WIN_LABEL_MIN_R = float(os.getenv("WIN_LABEL_MIN_R", 0.5))
 
+# Model vote in final confidence (AI mode). AI_MAX_WEIGHT is the ceiling the
+# trust ramp climbs to; the ramp itself still applies — zero say below 30 real
+# closed trades, full AI_MAX_WEIGHT at AI_WEIGHT_FULL_AT. Set AI_MAX_WEIGHT
+# to e.g. 0.70 to let a proven model dominate the SMC score.
+AI_MAX_WEIGHT = float(os.getenv("AI_MAX_WEIGHT", 0.40))
+AI_WEIGHT_FULL_AT = int(os.getenv("AI_WEIGHT_FULL_AT", 150))
+
 # ==========================================================
 # Trailing stop — let winners run instead of capping at TP
 # ==========================================================

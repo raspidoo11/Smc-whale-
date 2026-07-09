@@ -98,9 +98,6 @@ def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str
     exit_fee = calculate_exit_fee(exit_price, qty)
     pnl_after_fees = pnl - exit_fee
 
-    # Update account balance
-    update_balance(pnl_after_fees)
-
     # --- FIX #1: status was previously determined by matching exit_reason
     # against the literal string "Take Profit Hit" -- a string that no
     # longer exists anywhere in trade_monitor.py's current exit paths
@@ -126,6 +123,18 @@ def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str
             "exit_reason": exit_reason,
         },
     )
+
+    # --- FIX #3: only touch the balance if this call actually closed the
+    # trade. close_trade() returns None when the trade was already closed by
+    # another path (e.g. reconcile got there first) — updating the balance
+    # anyway double-counted the PnL and fired a second close alert.
+    if closed_trade is None:
+        logger.warning(
+            f"↩️ {trade['symbol']}: already closed elsewhere — skipping balance/alert"
+        )
+        return None
+
+    update_balance(pnl_after_fees)
 
     logger.info(
         f"✅ CLOSED {trade['symbol']} | {exit_reason} | {status} | "

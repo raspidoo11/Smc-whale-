@@ -72,6 +72,11 @@ async def _close_trade_record(trade, exit_price, exit_reason):
     from paper_trader import close_paper_trade_with_fees
     pnl_after_fees = close_paper_trade_with_fees(trade, exit_price, exit_reason)
 
+    # None = the trade was already closed by another path (e.g. reconcile) —
+    # balance untouched, and no second close alert.
+    if pnl_after_fees is None:
+        return
+
     balance = get_balance()["balance"]
     await send_alert(format_close_alert(trade, exit_price, exit_reason, pnl_after_fees, balance))
     # Retraining is intentionally NOT triggered here — it runs on its own

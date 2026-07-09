@@ -17,6 +17,8 @@ from config import (
     MIN_EXPECTED_R,
     CONFIDENCE_REQUIRED_SMC,
     RETRACE_ATR_FRACTION,
+    AI_MAX_WEIGHT,
+    AI_WEIGHT_FULL_AT,
 )
 
 logger = logging.getLogger(__name__)
@@ -35,15 +37,17 @@ NOW_FN = lambda: datetime.now(timezone.utc)
 MARKET_CONTEXT_FN = lambda symbol: {}
 
 
-def ai_blend_weight(n_real_closed, max_weight=0.40, min_trades=30, full_at=150):
+def ai_blend_weight(n_real_closed, max_weight=None, min_trades=30, full_at=None):
     """How much say the model gets in final confidence, as a function of how
     many REAL closed trades it has learned from (backtest-backfilled rows
     don't count — they're warm-start data, not evidence).
 
-    A model trained on 42 trades shouldn't carry the same 40% vote as one
-    trained on 300: below `min_trades` it gets zero say (pure SMC score);
-    influence then ramps linearly, reaching the full `max_weight` at
-    `full_at`. E.g. 42 real trades -> 40% * (12/120) = 4% influence."""
+    A model trained on 42 trades shouldn't carry the same vote as one trained
+    on 300: below `min_trades` it gets zero say (pure SMC score); influence
+    then ramps linearly, reaching AI_MAX_WEIGHT (env-tunable, default 0.40 —
+    set 0.70 to let a proven model dominate) at AI_WEIGHT_FULL_AT trades."""
+    max_weight = AI_MAX_WEIGHT if max_weight is None else max_weight
+    full_at = AI_WEIGHT_FULL_AT if full_at is None else full_at
     if n_real_closed <= min_trades:
         return 0.0
     ramp = min(1.0, (n_real_closed - min_trades) / (full_at - min_trades))

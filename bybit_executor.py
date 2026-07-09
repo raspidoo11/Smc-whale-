@@ -1,6 +1,7 @@
 import logging
 import os
 import time
+import uuid
 from exchange import get_trade_client, get_exchange
 from trade_manager import get_risk_amount
 from xgboost_trainer import get_ai_risk_percent
@@ -177,6 +178,13 @@ async def execute_trade(signal):
         if tp:
             params["takeProfit"] = str(tp)
 
+        # Idempotency key: the SAME orderLinkId is reused across retries, so if
+        # an attempt actually reached Bybit but the response timed out, the
+        # retry is rejected as a duplicate instead of opening a SECOND
+        # position (this was the "some trades come double" bug).
+        order_link_id = f"smcw-{signal.get('trade_no', 0)}-{uuid.uuid4().hex[:10]}"
+        params["orderLinkId"] = order_link_id
+
         logger.info(f"📤 Sending order: {params}")
 
         result = None
@@ -185,6 +193,19 @@ async def execute_trade(signal):
                 result = client.place_order(**params)
                 break
             except Exception as e:
+                msg = str(e).lower()
+                if "orderlinkid" in msg and ("duplicate" in msg or "exist" in msg):
+                    # The earlier attempt DID land — recover its orderId
+                    # instead of raising or re-placing.
+                    logger.info(f"↩️ Order already placed (duplicate orderLinkId), recovering {symbol}")
+                    resp = client.get_open_orders(
+                        category=CATEGORY, symbol=symbol, orderLinkId=order_link_id
+                    )
+                    rows = resp.get("result", {}).get("list", [])
+                    order_id = rows[0].get("orderId") if rows else None
+                    result = {"retCode": 0, "result": {"orderId": order_id,
+                                                       "orderLinkId": order_link_id}}
+                    break
                 if attempt == 2:
                     raise e
                 logger.warning(f"Retrying order ({attempt + 1}/3)")
@@ -193,6 +214,11 @@ async def execute_trade(signal):
         logger.info(f"📥 Bybit response: {result}")
 
         if result and result.get("retCode") == 0:
+            # Write the EXECUTED qty back onto the trade record. The caller
+            # sized qty with the paper formula; Bybit got THIS qty — every
+            # close alert / PnL / R calculation must use the real one, or a
+            # trailing-stop win shows a sliver of the actual profit.
+            signal["qty"] = float(qty)
             logger.info(f"✅ Order placed: {symbol} | Qty: {qty} | AI Risk Adjusted")
 
         return result

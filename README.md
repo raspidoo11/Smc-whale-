@@ -103,6 +103,8 @@ Copy `.env.example` → `.env`. Environment variables:
 | `CONFIDENCE_REQUIRED_SMC` | `40` | Confidence bar in pure-SMC mode (AI mode adapts dynamically) |
 | `NEWS_FILTER_ENABLED` | `false` | Pause entries in high-impact macro windows (edit news_filter.py first) |
 | `BLOCKED_SESSIONS` | *(none)* | UTC sessions with no new entries, e.g. `asian` or `london,quiet` (valid: asian/london/ny/quiet) |
+| `AI_MAX_WEIGHT` | `0.40` | Ceiling of the model's vote in final confidence (trust ramp still applies) |
+| `AI_WEIGHT_FULL_AT` | `150` | Real closed trades at which the model reaches its full vote |
 | `SLIPPAGE_PCT` | `0.02` | Adverse slippage per side in backtests |
 | `STORAGE_BACKEND` | `sqlite` | `sqlite` (auto-migrates JSON) or `json` |
 | `DATA_DIR` | `data` | State/model root (Railway volume: `/app/data`) |
