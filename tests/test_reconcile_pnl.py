@@ -46,3 +46,19 @@ def test_close_alert_shows_loss_and_negative_pnl():
     msg = format_close_alert(trade, 98.0, "Closed on exchange (SL/TP)", -3.0, 240.0)
     assert "LOSS" in msg
     assert "-3.00 USDT" in msg
+
+
+def test_add_daily_pnl_touches_breaker_not_balance(monkeypatch):
+    """Exchange-side closes must count toward the daily circuit breaker
+    without re-adjusting balance (wallet equity is already synced)."""
+    import trade_manager as tm
+
+    state = {"balance": 500.0, "daily_pnl": -10.0}
+    monkeypatch.setattr(tm, "get_balance", lambda: dict(state))
+    saved = {}
+    monkeypatch.setattr(tm, "save_balance", lambda d: saved.update(d))
+
+    tm.add_daily_pnl(-25.0)
+
+    assert saved["daily_pnl"] == -35.0   # breaker sees the loss
+    assert saved["balance"] == 500.0     # balance untouched (equity-synced)

@@ -17,7 +17,13 @@ It is a no-op in paper mode, where the local monitor is authoritative.
 
 import logging
 
-from trade_manager import get_open_trades, close_trade, get_balance, save_balance
+from trade_manager import (
+    get_open_trades,
+    close_trade,
+    get_balance,
+    save_balance,
+    add_daily_pnl,
+)
 from bybit_executor import (
     EXECUTE_TRADES,
     _pybit_symbol,
@@ -81,7 +87,7 @@ async def reconcile_positions():
             f"{' approx' if approx else ''}); recording locally"
         )
 
-        close_trade(
+        closed = close_trade(
             trade.get("symbol"),
             exit_price,
             status,
@@ -91,6 +97,14 @@ async def reconcile_positions():
                                + (" · approx PnL" if approx else ""),
             },
         )
+
+        if closed is None:
+            continue  # another path already recorded it — no daily-pnl/alert
+
+        # Balance is synced from wallet equity (reconcile_balance runs first),
+        # but the daily circuit breaker must still see this loss/win — without
+        # this, every exchange-side close was invisible to DAILY_LOSS_LIMIT.
+        add_daily_pnl(realized)
 
         balance = get_balance().get("balance", 0)
         try:

@@ -153,6 +153,17 @@ def update_balance(pnl):
     save_balance(data)
     return data
 
+def add_daily_pnl(pnl):
+    """Record PnL against the daily circuit breaker WITHOUT touching balance.
+    Used by reconcile for exchange-side closes: wallet equity is already
+    synced from the exchange (so balance must not be adjusted again), but
+    daily_pnl previously wasn't updated at all — leaving the daily loss
+    breaker blind to every trade Bybit closed via its own SL/TP."""
+    data = get_balance()
+    data["daily_pnl"] += pnl
+    save_balance(data)
+    return data
+
 def trading_allowed():
     if os.getenv("DAILY_PROTECTION", "true").lower() == "false":
         return True

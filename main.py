@@ -49,6 +49,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# httpx logs every Telegram API request at INFO — including the full URL,
+# which contains the BOT TOKEN in plaintext. Silencing it keeps secrets out
+# of Railway logs (and cuts noise).
+logging.getLogger("httpx").setLevel(logging.WARNING)
+logging.getLogger("httpcore").setLevel(logging.WARNING)
+
 if EXECUTE_TRADES:
     exchange = get_exchange()
 else:
