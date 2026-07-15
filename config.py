@@ -105,10 +105,13 @@ INVALIDATE_PENDING_ON_STRUCTURE = (
 # sit inside the noise that sweeps equal highs/lows. New policy:
 #   SL = beyond structural swing + buffer, AND at least MIN_SL_ATR from entry.
 # That is the *wider* of the two constraints (more room), never the tighter.
+# Swing is taken as the *wider* of entry TF (5m) and bias TF (15m) so the
+# stop is not parked under micro equal-lows that look like bait on 15m.
 MIN_SL_ATR = float(os.getenv("MIN_SL_ATR", 1.15))
 # Extra room past the swing so a wick through equal lows/highs doesn't tag SL.
 STRUCTURE_SL_BUFFER_ATR = float(os.getenv("STRUCTURE_SL_BUFFER_ATR", 0.25))
-# Structural swing lookback in entry-TF bars (20 × 5m ≈ 100m of structure).
+# Structural swing lookback in bars on *each* TF used for the stop
+# (20 × 5m ≈ 100m; 20 × 15m ≈ 5h of bias structure).
 STRUCTURE_SWING_LOOKBACK = int(os.getenv("STRUCTURE_SWING_LOOKBACK", 20))
 
 # ==========================================================

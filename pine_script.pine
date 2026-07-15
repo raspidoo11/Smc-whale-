@@ -5,7 +5,7 @@
 //   * soft institutional score (bias + edges; vol/disp are bonuses)
 //   * recent liquidity sweeps (not same-bar only)
 //   * open FVG lookback + CRT (1H sweep-reclaim)
-//   * structure SL: beyond swing + buffer AND min ATR floor (anti stop-hunt)
+//   * structure SL: wider of entry+bias TF swing + buffer AND min ATR floor
 //   * prediction limit zones: deepest valid of OB mid / FVG mid / ATR pullback
 //   * soft confidence bar for Limit mode; stricter for Market mode
 // XGBoost / expected-R cannot run in Pine — confidence is pure SMC + bonuses.
@@ -72,9 +72,10 @@ minSetupScore = input.int(20, "Min Soft Setup Score (Limit mode)", group = "Entr
      tooltip = "LIMIT_MIN_SETUP_SCORE — HTF bias + at least one edge.")
 
 // ---- Anti stop-hunt (config.py) ----
+// Swing = wider of entry TF + trend TF so SL is not under 15m equal-low bait.
 minSlAtr = input.float(1.15, "Min SL Distance (xATR)", group = "Stop Placement", step = 0.05)
 structSlBufferAtr = input.float(0.25, "Structure SL Buffer (xATR)", group = "Stop Placement", step = 0.05)
-structSwingLookback = input.int(20, "Structure Swing Lookback (bars)", group = "Stop Placement")
+structSwingLookback = input.int(20, "Structure Swing Lookback (bars per TF)", group = "Stop Placement")
 
 // ---- Display-only extras (not part of bot signal gate) ----
 pdLookback     = input.int(50, "Premium/Discount Range Lookback", group = "Premium/Discount")
@@ -220,11 +221,23 @@ f_entry_core(dispMult, sweepLookback, sweepSwingWin, obLookback, structLb) =>
  bullFvg, bearFvg, bullFvgMid, bearFvgMid,
  entryATR, entryATRAvg, regimeCode,
  obLongMid, obShortMid, foundLongOB, foundShortOB,
- structSwingLow, structSwingHigh,
+ structSwingLowEntry, structSwingHighEntry,
  obBullCandle, obBearCandle, obHigh, obLow] =
      request.security(syminfo.tickerid, entryTF,
           f_entry_core(displacementATR, 8, 12, 15, structSwingLookback),
           barmerge.gaps_off, barmerge.lookahead_off)
+
+// Bias-TF structure swing (same lookback bars on trend TF). Wider of entry +
+// bias so SL clears the stop-hunt bait that shows on the 15m chart.
+f_struct_swing(structLb) =>
+    [ta.lowest(low[1], structLb), ta.highest(high[1], structLb)]
+
+[structSwingLowBias, structSwingHighBias] = request.security(
+     syminfo.tickerid, trendTF, f_struct_swing(structSwingLookback),
+     barmerge.gaps_off, barmerge.lookahead_off)
+
+structSwingLow  = math.min(structSwingLowEntry, structSwingLowBias)
+structSwingHigh = math.max(structSwingHighEntry, structSwingHighBias)
 
 // CRT on 1H: cur hour sweeps prior completed hour's extreme + reclaim
 // (crt_flags in strategy.py)

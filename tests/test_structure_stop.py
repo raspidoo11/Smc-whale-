@@ -2,6 +2,9 @@
 
 Guards the fix for the classic bait: stops sitting on the swing with a 0.05%
 nudge, or sub-1.0 ATR noise room that equal-high/low sweeps farm.
+
+Also guards HTF structure: entry-TF (5m) alone parks SL under equal-lows that
+print as stop-hunt bait on the bias TF (15m chart).
 """
 
 import numpy as np
@@ -9,7 +12,7 @@ import pandas as pd
 import pytest
 
 import strategy
-from strategy import compute_structure_stop, get_signal
+from strategy import compute_structure_stop, compute_structure_stop_htf, get_signal
 from config import MIN_SL_ATR, STRUCTURE_SL_BUFFER_ATR
 from test_feature_parity import _breakout_df
 
@@ -117,3 +120,48 @@ def test_rejects_bad_direction():
     df = _ohlcv_with_swing()
     with pytest.raises(ValueError):
         compute_structure_stop("SIDEWAYS", df, 100.0, 1.0)
+
+
+def test_htf_stop_clears_bias_swing_not_just_entry_noise():
+    """5m swing near entry is bait on 15m; bias swing is deeper — SL must clear it."""
+    atr = 1.0
+    entry = 100.0
+    # Entry TF: shallow equal-low bait just under price.
+    df_5m = _ohlcv_with_swing(n=40, swing_low=99.2, last_close=100.0)
+    # Bias TF: real structure well below (what you see on 15m).
+    df_15m = _ohlcv_with_swing(n=40, swing_low=97.0, last_close=100.0)
+
+    sl_entry_only, _ = compute_structure_stop("LONG", df_5m, entry, atr)
+    sl, swing = compute_structure_stop_htf("LONG", df_5m, df_15m, entry, atr)
+
+    assert swing == pytest.approx(97.0)
+    assert sl <= 97.0 - STRUCTURE_SL_BUFFER_ATR * atr + 1e-9
+    # Must be at least as wide as entry-only (never *tighter* than 5m).
+    assert sl <= sl_entry_only + 1e-9
+    # And clearly past the 5m bait level.
+    assert sl < 99.2
+
+
+def test_htf_stop_short_clears_bias_swing():
+    atr = 1.0
+    entry = 100.0
+    df_5m = _ohlcv_with_swing(n=40, swing_high=100.8, last_close=100.0)
+    df_15m = _ohlcv_with_swing(n=40, swing_high=103.0, last_close=100.0)
+
+    sl_entry_only, _ = compute_structure_stop("SHORT", df_5m, entry, atr)
+    sl, swing = compute_structure_stop_htf("SHORT", df_5m, df_15m, entry, atr)
+
+    assert swing == pytest.approx(103.0)
+    assert sl >= 103.0 + STRUCTURE_SL_BUFFER_ATR * atr - 1e-9
+    assert sl >= sl_entry_only - 1e-9
+    assert sl > 100.8
+
+
+def test_htf_falls_back_when_bias_missing():
+    atr = 1.0
+    entry = 100.0
+    df_5m = _ohlcv_with_swing(swing_low=98.5)
+    sl_e, swing_e = compute_structure_stop("LONG", df_5m, entry, atr)
+    sl, swing = compute_structure_stop_htf("LONG", df_5m, None, entry, atr)
+    assert sl == pytest.approx(sl_e)
+    assert swing == pytest.approx(swing_e)

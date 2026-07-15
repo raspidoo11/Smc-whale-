@@ -102,7 +102,7 @@ Copy `.env.example` → `.env`. Environment variables:
 | `RETRACE_ATR_FRACTION` | `0.45` | Fallback pullback depth (×ATR) when no FVG/OB |
 | `MIN_SL_ATR` | `1.15` | Minimum stop distance in ATRs (anti stop-hunt floor) |
 | `STRUCTURE_SL_BUFFER_ATR` | `0.25` | Extra room beyond structural swing (×ATR) so equal-high/low sweeps don't tag SL |
-| `STRUCTURE_SWING_LOOKBACK` | `20` | Entry-TF bars used to find the structural swing for SL |
+| `STRUCTURE_SWING_LOOKBACK` | `20` | Bars per TF for structural swing; SL uses the *wider* of entry (5m) + bias (15m) |
 | `SPREAD_MAX_FRACTION_OF_RISK` | `0.15` | Skip entry if bid-ask spread eats more of the risk than this |
 | `CONFIDENCE_REQUIRED_SMC` | `40` | Confidence bar in pure-SMC *market* mode |
 | `CONFIDENCE_REQUIRED_LIMIT` | `28` | Softer bar for resting prediction limits |

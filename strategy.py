@@ -183,6 +183,9 @@ def compute_structure_stop(direction, df_entry, entry, atr):
 
     Returns (sl, structure_swing). structure_swing is the raw swing used for
     the level (before buffer) so callers can log / invalidate later.
+
+    Prefer ``compute_structure_stop_htf`` when a bias TF is available — entry-TF
+    swings alone often sit under the equal-high/low bait visible on 15m.
     """
     atr = float(atr)
     entry = float(entry)
@@ -217,6 +220,33 @@ def compute_structure_stop(direction, df_entry, entry, atr):
         sl = max(structure_sl, atr_floor)
         sl = max(sl, entry + atr * 0.10)
         return float(sl), float(swing)
+
+    raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
+
+
+def compute_structure_stop_htf(direction, df_entry, df_bias, entry, atr):
+    """Stop beyond the *wider* of entry-TF and bias-TF structure.
+
+    Bias TF (15m scalp stack) is the trade thesis; entry TF (5m) alone parks
+    SL under micro equal-lows/highs that print as stop-hunt bait on 15m.
+    Always take the wider room + deeper raw swing for invalidation.
+    """
+    sl_e, swing_e = compute_structure_stop(direction, df_entry, entry, atr)
+    if df_bias is None or len(df_bias) < 5:
+        return sl_e, swing_e
+
+    sl_b, swing_b = compute_structure_stop(direction, df_bias, entry, atr)
+
+    if direction == "LONG":
+        # Lower price = more room; deeper swing for invalidation.
+        if sl_b < sl_e:
+            return float(sl_b), float(min(swing_e, swing_b))
+        return float(sl_e), float(min(swing_e, swing_b))
+
+    if direction == "SHORT":
+        if sl_b > sl_e:
+            return float(sl_b), float(max(swing_e, swing_b))
+        return float(sl_e), float(max(swing_e, swing_b))
 
     raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
 
@@ -580,8 +610,8 @@ def get_signal(symbol, df_15m, df_5m):
         # Dynamic Stop Loss / Take Profit
         # ----------------------------------------------------------
         # RR target still adapts to vol/score. Stop placement is
-        # structure-first (compute_structure_stop) — never the old
-        # "tight ATR multiple sitting on the swing" stop-hunt bait.
+        # structure-first across entry + bias TF (compute_structure_stop_htf)
+        # — never the old "tight ATR multiple sitting on the 5m swing" bait.
         # ==========================================================
 
         atr_average = df_5m["atr"].dropna().tail(30).mean()
@@ -621,7 +651,10 @@ def get_signal(symbol, df_15m, df_5m):
         direction = "LONG" if trend_bull else "SHORT"
 
         # Structure stop from signal close first (risk geometry).
-        sl, structure_swing = compute_structure_stop(direction, df_5m, entry, atr)
+        # Wider of 5m + 15m structure so SL is not parked under 15m bait.
+        sl, structure_swing = compute_structure_stop_htf(
+            direction, df_5m, df_15m, entry, atr
+        )
 
         if direction == "LONG":
             tp = entry + ((entry - sl) * rr)
@@ -643,8 +676,8 @@ def get_signal(symbol, df_15m, df_5m):
         # Recompute SL/TP at the *limit* so risk is measured from where we
         # actually intend to get filled (not the chase price).
         if ENTRY_MODE == "limit":
-            sl, structure_swing = compute_structure_stop(
-                direction, df_5m, limit_price, atr
+            sl, structure_swing = compute_structure_stop_htf(
+                direction, df_5m, df_15m, limit_price, atr
             )
             if direction == "LONG":
                 sl = min(sl, limit_price - atr * MIN_SL_ATR * 0.85)
