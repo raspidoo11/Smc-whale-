@@ -18,7 +18,12 @@ from alerts import (
     format_limit_filled_alert,
     format_limit_cancelled_alert,
 )
-from config import TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO, LIMIT_TTL_MINUTES
+from config import (
+    TRAIL_PERCENT,
+    TRAIL_ACTIVATION_RATIO,
+    LIMIT_TTL_MINUTES,
+    INVALIDATE_PENDING_ON_STRUCTURE,
+)
 
 logger = logging.getLogger(__name__)
 exchange = get_exchange()
@@ -116,15 +121,56 @@ async def _handle_paper_trailing(trade, symbol, direction, current_price, open_t
     return False
 
 
+def _structure_invalidated(direction, current_price, trade):
+    """True if price has traded through the setup's invalidation level.
+
+    Prefer explicit invalidation_price / structure_swing (the raw swing the
+    stop was anchored to). Fall back to SL only when those are missing — and
+    only when SL is on the correct side of the resting limit, so a bad fixture
+    never false-cancels.
+    """
+    if not INVALIDATE_PENDING_ON_STRUCTURE:
+        return False
+    if current_price is None:
+        return False
+
+    level = trade.get("invalidation_price")
+    if level is None:
+        level = trade.get("structure_swing")
+    if level is None:
+        level = trade.get("sl")
+        # Guard: SL must be on the protective side of the limit entry.
+        entry = trade.get("entry")
+        if level is None or entry is None:
+            return False
+        try:
+            if direction == "LONG" and float(level) >= float(entry):
+                return False
+            if direction == "SHORT" and float(level) <= float(entry):
+                return False
+        except (TypeError, ValueError):
+            return False
+
+    try:
+        level = float(level)
+        price = float(current_price)
+    except (TypeError, ValueError):
+        return False
+
+    if direction == "LONG":
+        return price < level
+    return price > level
+
+
 async def _handle_pending_order(trade, symbol, direction, current_price, open_trades):
     """Lifecycle of a resting limit order (status == "PENDING").
 
     Paper: fill when price trades through the limit level; expire after
-    LIMIT_TTL_MINUTES if never touched. Live: mirror Bybit's actual order
-    status, cancelling the resting order on expiry. Cancelled/expired orders
-    are removed WITHOUT touching trade history — a never-opened order must not
-    pollute training data. Returns True if the pending entry left the book
-    (filled or cancelled) so the caller persists."""
+    LIMIT_TTL_MINUTES if never touched; cancel early if structure invalidates.
+    Live: mirror Bybit's actual order status, cancelling on expiry or
+    structure break. Cancelled/expired orders are removed WITHOUT touching
+    trade history — a never-opened order must not pollute training data.
+    Returns True if the pending entry left the book (filled or cancelled)."""
     limit_price = float(trade.get("entry", 0))
 
     async def _fill():
@@ -140,8 +186,13 @@ async def _handle_pending_order(trade, symbol, direction, current_price, open_tr
 
     minutes_pending = _minutes_since(trade.get("placed_at"))
     expired = minutes_pending is not None and minutes_pending > LIMIT_TTL_MINUTES
+    invalidated = _structure_invalidated(direction, current_price, trade)
 
     if not EXECUTE_TRADES:
+        # Structure break first: do not fill a thesis that already failed.
+        if invalidated:
+            await _cancel("Structure invalidated before fill")
+            return True
         touched = (
             current_price <= limit_price
             if direction == "LONG"
@@ -173,6 +224,14 @@ async def _handle_pending_order(trade, symbol, direction, current_price, open_tr
         # A position already exists; let it keep filling — never expire a
         # partially-filled order out from under an open position.
         return False
+
+    if invalidated:
+        if cancel_order(symbol, order_id):
+            if get_order_status(symbol, order_id) == "Filled":
+                await _fill()
+            else:
+                await _cancel("Structure invalidated before fill")
+            return True
 
     if expired:
         if cancel_order(symbol, order_id):

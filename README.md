@@ -96,11 +96,17 @@ Copy `.env.example` → `.env`. Environment variables:
 | `MIN_EXPECTED_R` | `0.0` | Min model-expected R to accept a trade (AI mode) |
 | `TRAIL_ACTIVATION_RATIO` | `0.97` | Fraction of entry→TP at which TP is cancelled and trailing arms |
 | `TRAIL_PERCENT` | `0.5` | Trailing distance as % of price |
-| `ENTRY_MODE` | `limit` | `limit` = retrace limit entries (FVG midpoint / ATR pullback); `market` = legacy chase-at-close |
-| `LIMIT_TTL_MINUTES` | `30` | Cancel an unfilled limit order after this long |
-| `RETRACE_ATR_FRACTION` | `0.35` | Fallback retrace depth (×ATR) when no FVG exists |
+| `ENTRY_MODE` | `limit` | `limit` = prediction zones (OB / FVG / ATR pullback); `market` = chase close |
+| `LIMIT_TTL_MINUTES` | `180` | How long a resting prediction may wait (desk-style) |
+| `INVALIDATE_PENDING_ON_STRUCTURE` | `true` | Cancel unfilled limits if structure breaks before fill |
+| `RETRACE_ATR_FRACTION` | `0.45` | Fallback pullback depth (×ATR) when no FVG/OB |
+| `MIN_SL_ATR` | `1.15` | Minimum stop distance in ATRs (anti stop-hunt floor) |
+| `STRUCTURE_SL_BUFFER_ATR` | `0.25` | Extra room beyond structural swing (×ATR) so equal-high/low sweeps don't tag SL |
+| `STRUCTURE_SWING_LOOKBACK` | `20` | Entry-TF bars used to find the structural swing for SL |
 | `SPREAD_MAX_FRACTION_OF_RISK` | `0.15` | Skip entry if bid-ask spread eats more of the risk than this |
-| `CONFIDENCE_REQUIRED_SMC` | `40` | Confidence bar in pure-SMC mode (AI mode adapts dynamically) |
+| `CONFIDENCE_REQUIRED_SMC` | `40` | Confidence bar in pure-SMC *market* mode |
+| `CONFIDENCE_REQUIRED_LIMIT` | `28` | Softer bar for resting prediction limits |
+| `LIMIT_MIN_SETUP_SCORE` | `20` | Min soft setup score (HTF bias + edge) to place a limit |
 | `NEWS_FILTER_ENABLED` | `false` | Pause entries in high-impact macro windows (edit news_filter.py first) |
 | `BLOCKED_SESSIONS` | *(none)* | UTC sessions with no new entries, e.g. `asian` or `london,quiet` (valid: asian/london/ny/quiet) |
 | `AI_MAX_WEIGHT` | `0.40` | Ceiling of the model's vote in final confidence (trust ramp still applies) |

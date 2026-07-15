@@ -49,8 +49,16 @@ def test_dynamic_threshold_bounded():
     for regime in ("trending", "ranging", "volatile"):
         for wr in (0.0, 0.5, 1.0):
             for atr in (0, 50, 100):
-                t = get_dynamic_confidence_threshold(regime=regime, atr_percentile=atr, recent_win_rate=wr)
-                assert 30 <= t <= 75
+                t_limit = get_dynamic_confidence_threshold(
+                    regime=regime, atr_percentile=atr, recent_win_rate=wr, entry_mode="limit"
+                )
+                t_market = get_dynamic_confidence_threshold(
+                    regime=regime, atr_percentile=atr, recent_win_rate=wr, entry_mode="market"
+                )
+                # Limit mode is softer (floor 22); market stays stricter (floor 30).
+                assert 22 <= t_limit <= 75
+                assert 30 <= t_market <= 75
+                assert t_limit <= t_market
 
 
 # ----- expected-R filter (wired into get_signal, AI mode) -----

@@ -1050,27 +1050,40 @@ def get_expected_r(trade_features):
         return None
 
 
-def get_dynamic_confidence_threshold(regime="ranging", atr_percentile=50, recent_win_rate=0.5):
-    base_threshold = 45
+def get_dynamic_confidence_threshold(
+    regime="ranging",
+    atr_percentile=50,
+    recent_win_rate=0.5,
+    entry_mode="limit",
+):
+    """Adaptive confidence bar.
+
+    Limit mode starts lower: resting a prediction is cheap (cancels if wrong);
+    market mode stays stricter because a market fill commits capital immediately.
+    Does not change model features or labels — gate only.
+    """
+    base_threshold = 32 if entry_mode == "limit" else 45
 
     if regime == "trending":
         base_threshold -= 5
     elif regime == "volatile":
-        base_threshold += 10
+        base_threshold += 8 if entry_mode == "limit" else 10
     elif regime == "ranging":
-        base_threshold += 6
+        # Chop farms stops — pickier, especially on market entries.
+        base_threshold += 4 if entry_mode == "limit" else 6
 
     if recent_win_rate > 0.55:
-        base_threshold -= 6
+        base_threshold -= 5 if entry_mode == "limit" else 6
     elif recent_win_rate < 0.40:
-        base_threshold += 12
+        base_threshold += 10 if entry_mode == "limit" else 12
 
     if atr_percentile > 80:
-        base_threshold += 6
+        base_threshold += 5 if entry_mode == "limit" else 6
     elif atr_percentile < 20:
-        base_threshold -= 4
+        base_threshold -= 3 if entry_mode == "limit" else 4
 
-    return max(30, min(75, base_threshold))
+    floor = 22 if entry_mode == "limit" else 30
+    return max(floor, min(75, base_threshold))
 
 
 def get_ai_risk_percent(ai_prob, recent_drawdown=0.0, regime="ranging"):

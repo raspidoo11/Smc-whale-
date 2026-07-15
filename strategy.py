@@ -16,9 +16,15 @@ from xgboost_trainer import (
 from config import (
     MIN_EXPECTED_R,
     CONFIDENCE_REQUIRED_SMC,
+    CONFIDENCE_REQUIRED_LIMIT,
+    LIMIT_MIN_SETUP_SCORE,
     RETRACE_ATR_FRACTION,
     AI_MAX_WEIGHT,
     AI_WEIGHT_FULL_AT,
+    MIN_SL_ATR,
+    STRUCTURE_SL_BUFFER_ATR,
+    STRUCTURE_SWING_LOOKBACK,
+    ENTRY_MODE,
 )
 
 logger = logging.getLogger(__name__)
@@ -164,6 +170,57 @@ def bearish_bos(df, structure_lookback=10, confirm_candles=2):
     return bool((recent_closes < swing_low).all())
 
 
+def compute_structure_stop(direction, df_entry, entry, atr):
+    """Institutional stop: beyond structure + buffer, with a min ATR floor.
+
+    Classic stop-hunt bait was `min(swing*0.9995, entry ± atr*0.7..1.0)` —
+    the swing sat *on* equal highs/lows (0.05% "buffer") and the ATR multiples
+    lived inside 5m noise. Crypto sweeps those levels by design.
+
+    Policy (always the *wider* room, never a sub-noise ATR clip):
+      LONG  SL = min(swing_low - buffer, entry - MIN_SL_ATR * atr)
+      SHORT SL = max(swing_high + buffer, entry + MIN_SL_ATR * atr)
+
+    Returns (sl, structure_swing). structure_swing is the raw swing used for
+    the level (before buffer) so callers can log / invalidate later.
+    """
+    atr = float(atr)
+    entry = float(entry)
+    if atr <= 0 or not np.isfinite(atr) or not np.isfinite(entry):
+        raise ValueError(f"invalid atr/entry for stop: atr={atr} entry={entry}")
+
+    lookback = min(STRUCTURE_SWING_LOOKBACK, max(5, len(df_entry) - 2))
+    buffer = atr * STRUCTURE_SL_BUFFER_ATR
+    floor_dist = atr * MIN_SL_ATR
+
+    # Exclude the forming/signal bar from the swing window (same anti-repaint
+    # idea as BOS): stop under "this candle's low" is not structure.
+    window = df_entry.iloc[-(lookback + 1):-1]
+    if len(window) < 3:
+        window = df_entry.iloc[:-1] if len(df_entry) > 1 else df_entry
+
+    if direction == "LONG":
+        swing = float(window["low"].min())
+        structure_sl = swing - buffer
+        atr_floor = entry - floor_dist
+        # Lower price = more room for a long stop.
+        sl = min(structure_sl, atr_floor)
+        # Hard sanity: never above or on entry.
+        sl = min(sl, entry - atr * 0.10)
+        return float(sl), float(swing)
+
+    if direction == "SHORT":
+        swing = float(window["high"].max())
+        structure_sl = swing + buffer
+        atr_floor = entry + floor_dist
+        # Higher price = more room for a short stop.
+        sl = max(structure_sl, atr_floor)
+        sl = max(sl, entry + atr * 0.10)
+        return float(sl), float(swing)
+
+    raise ValueError(f"direction must be LONG or SHORT, got {direction!r}")
+
+
 def crt_flags(df_5m):
     """Candle Range Theory: has price swept the PREVIOUS completed 1H candle's
     low (or high) and reclaimed back inside its range? The manipulation leg of
@@ -190,6 +247,122 @@ def crt_flags(df_5m):
         return bull_crt, bear_crt
     except Exception:
         return 0, 0
+
+
+def recent_liquidity_sweep(df_5m, direction, lookback=8, swing_window=12):
+    """True if a liquidity sweep + reclaim printed in the last `lookback` bars.
+
+    Desks place limits *after* the sweep is on the chart — they do not wait for
+    sweep + displacement + volume + FVG on the *same* candle (that forced late,
+    crowded entries). Same-bar sweep still scores; a recent sweep also counts.
+    """
+    if len(df_5m) < swing_window + lookback + 2:
+        return False
+    for i in range(1, lookback + 1):
+        idx = -i
+        start = idx - swing_window
+        end = idx
+        if abs(start) > len(df_5m):
+            continue
+        window = df_5m.iloc[start:end]
+        if len(window) < 3:
+            continue
+        candle = df_5m.iloc[idx]
+        if direction == "LONG":
+            swing_low = window["low"].min()
+            if float(candle["low"]) < float(swing_low) and float(candle["close"]) > float(candle["open"]):
+                return True
+        else:
+            swing_high = window["high"].max()
+            if float(candle["high"]) > float(swing_high) and float(candle["close"]) < float(candle["open"]):
+                return True
+    return False
+
+
+def find_order_block(df_5m, direction, lookback=15):
+    """Last opposing candle before a displacement impulse — demand/supply OB mid.
+
+    LONG  → last bearish candle before a bullish impulse (demand).
+    SHORT → last bullish candle before a bearish impulse (supply).
+    Returns the OB mid price, or None.
+    """
+    if len(df_5m) < lookback + 3:
+        return None
+    segment = df_5m.iloc[-(lookback + 1):-1]
+    if direction == "LONG":
+        for i in range(len(segment) - 1, 0, -1):
+            c = segment.iloc[i]
+            body = abs(float(c["close"]) - float(c["open"]))
+            atr_i = float(c["atr"]) if "atr" in c.index and pd.notna(c["atr"]) else body
+            if float(c["close"]) > float(c["open"]) and body > atr_i * 0.55:
+                prev = segment.iloc[i - 1]
+                if float(prev["close"]) < float(prev["open"]):
+                    return (float(prev["open"]) + float(prev["low"])) / 2.0
+    else:
+        for i in range(len(segment) - 1, 0, -1):
+            c = segment.iloc[i]
+            body = abs(float(c["close"]) - float(c["open"]))
+            atr_i = float(c["atr"]) if "atr" in c.index and pd.notna(c["atr"]) else body
+            if float(c["close"]) < float(c["open"]) and body > atr_i * 0.55:
+                prev = segment.iloc[i - 1]
+                if float(prev["close"]) > float(prev["open"]):
+                    return (float(prev["open"]) + float(prev["high"])) / 2.0
+    return None
+
+
+def choose_limit_zone(direction, entry, sl, atr, df_5m, bull_fvg, bear_fvg):
+    """Pick the best resting limit: deepest valid of OB / FVG mid / ATR pullback.
+
+    Clamped so risk to SL stays at least 30% of the signal-close risk distance
+    (avoids limit-at-SL nonsense) and the order stays on the pullback side of
+    current price.
+    """
+    atr = float(atr)
+    entry = float(entry)
+    sl = float(sl)
+    candidates = []
+
+    if direction == "LONG":
+        if bull_fvg and len(df_5m) >= 3:
+            gap_bottom = float(df_5m["high"].iloc[-3])
+            gap_top = float(df_5m["low"].iloc[-1])
+            candidates.append(("fvg", (gap_bottom + gap_top) / 2.0))
+        ob = find_order_block(df_5m, "LONG")
+        if ob is not None:
+            candidates.append(("order_block", float(ob)))
+        candidates.append(("atr_pullback", entry - atr * RETRACE_ATR_FRACTION))
+
+        min_limit = sl + 0.30 * (entry - sl)
+        valid = [(z, p) for z, p in candidates if min_limit <= p <= entry]
+        if not valid:
+            limit_price = max(min_limit, min(entry, entry - atr * 0.25))
+            zone_type = "atr_pullback"
+        else:
+            # Deepest valid = best fill for a long (lowest price).
+            zone_type, limit_price = min(valid, key=lambda t: t[1])
+        limit_price = min(float(limit_price), entry)
+        limit_price = max(float(limit_price), min_limit)
+    else:
+        if bear_fvg and len(df_5m) >= 3:
+            gap_top = float(df_5m["low"].iloc[-3])
+            gap_bottom = float(df_5m["high"].iloc[-1])
+            candidates.append(("fvg", (gap_top + gap_bottom) / 2.0))
+        ob = find_order_block(df_5m, "SHORT")
+        if ob is not None:
+            candidates.append(("order_block", float(ob)))
+        candidates.append(("atr_pullback", entry + atr * RETRACE_ATR_FRACTION))
+
+        max_limit = sl - 0.30 * (sl - entry)
+        valid = [(z, p) for z, p in candidates if entry <= p <= max_limit]
+        if not valid:
+            limit_price = min(max_limit, max(entry, entry + atr * 0.25))
+            zone_type = "atr_pullback"
+        else:
+            zone_type, limit_price = max(valid, key=lambda t: t[1])
+        limit_price = max(float(limit_price), entry)
+        limit_price = min(float(limit_price), max_limit)
+
+    return float(limit_price), zone_type
 
 
 # ==========================================================
@@ -230,77 +403,97 @@ def get_signal(symbol, df_15m, df_5m):
         swing_high = df_5m["high"].iloc[-10:-1].max()
 
         # ------------------------------------
-        # Liquidity Sweep
+        # Liquidity Sweep (same-bar OR recent window)
         # ------------------------------------
+        # Same-bar sweep still scores; a recent sweep in the last ~8 bars also
+        # counts so we can rest a limit without requiring every confluence on
+        # this exact candle.
 
         if USE_XGBOOST:
 
-            bull_sweep = (
+            bull_sweep_now = (
                 latest["low"] < swing_low
                 and latest["close"] > latest["open"]
             )
 
-            bear_sweep = (
+            bear_sweep_now = (
                 latest["high"] > swing_high
                 and latest["close"] < latest["open"]
             )
 
         else:
 
-            bull_sweep = (
+            bull_sweep_now = (
                 latest["low"] <= swing_low * 1.0002
                 and latest["close"] > latest["open"]
             )
 
-            bear_sweep = (
+            bear_sweep_now = (
                 latest["high"] >= swing_high * 0.9998
                 and latest["close"] < latest["open"]
             )
 
+        bull_sweep_recent = recent_liquidity_sweep(df_5m, "LONG")
+        bear_sweep_recent = recent_liquidity_sweep(df_5m, "SHORT")
+        bull_sweep = bull_sweep_now or bull_sweep_recent
+        bear_sweep = bear_sweep_now or bear_sweep_recent
+
         # ------------------------------------
-        # Fair Value Gap
+        # Fair Value Gap (current or still-open prior gap)
         # ------------------------------------
 
         bull_fvg = (
             df_5m["low"].iloc[-1]
             > df_5m["high"].iloc[-3]
         )
+        if not bull_fvg and len(df_5m) >= 5:
+            for k in range(2, 5):
+                if df_5m["low"].iloc[-k] > df_5m["high"].iloc[-(k + 2)]:
+                    if float(latest["close"]) > float(df_5m["high"].iloc[-(k + 2)]):
+                        bull_fvg = True
+                        break
 
         bear_fvg = (
             df_5m["high"].iloc[-1]
             < df_5m["low"].iloc[-3]
         )
+        if not bear_fvg and len(df_5m) >= 5:
+            for k in range(2, 5):
+                if df_5m["high"].iloc[-k] < df_5m["low"].iloc[-(k + 2)]:
+                    if float(latest["close"]) < float(df_5m["low"].iloc[-(k + 2)]):
+                        bear_fvg = True
+                        break
 
-        # Candle Range Theory: sweep-and-reclaim of the previous 1H candle's
-        # range. Feature only — deliberately NOT added to the SMC score, so
-        # signal generation is unchanged; the model decides its worth.
+        # Candle Range Theory: now a soft setup edge (was feature-only).
         bull_crt, bear_crt = crt_flags(df_5m)
 
+        # Soft institutional score: HTF bias + edges. Volume/displacement are
+        # bonuses, NOT hard requirements — rest the limit when structure is
+        # there and wait; do not need a volume spike on the order bar.
         score = 0
 
-        if latest["volume_spike"]:
-
-            score += 25
-
-        if latest["displacement"]:
-
-            score += 25
-
-        if trend_bull:
-
-            score += 20
-
-        if trend_bear:
-
+        if trend_bull or trend_bear:
             score += 20
 
         if bull_sweep or bear_sweep:
-
             score += 20
 
         if bull_fvg or bear_fvg:
-
             score += 15
+
+        if bull_crt or bear_crt:
+            score += 15
+
+        if latest["volume_spike"]:
+            score += 15
+
+        if latest["displacement"]:
+            score += 15
+
+        _ob_long = find_order_block(df_5m, "LONG")
+        _ob_short = find_order_block(df_5m, "SHORT")
+        if (trend_bull and _ob_long is not None) or (trend_bear and _ob_short is not None):
+            score += 10
 
         entry = float(latest["close"])
 
@@ -385,6 +578,10 @@ def get_signal(symbol, df_15m, df_5m):
 
         # ==========================================================
         # Dynamic Stop Loss / Take Profit
+        # ----------------------------------------------------------
+        # RR target still adapts to vol/score. Stop placement is
+        # structure-first (compute_structure_stop) — never the old
+        # "tight ATR multiple sitting on the swing" stop-hunt bait.
         # ==========================================================
 
         atr_average = df_5m["atr"].dropna().tail(30).mean()
@@ -395,100 +592,79 @@ def get_signal(symbol, df_15m, df_5m):
         if USE_XGBOOST:
 
             if atr > atr_average * 1.30:
-                sl_multiplier = 1.00
                 rr = 2.50
 
             elif atr < atr_average * 0.70:
-                sl_multiplier = 0.70
                 rr = 1.80
 
             else:
-                sl_multiplier = 0.85
                 rr = 2.00
 
         else:
 
-            # Easier targets while collecting AI data
-            # Dynamic RR based on SMC score (higher confluence = better RR)
-            sl_multiplier = 0.80
-            if score >= 80:
+            # Dynamic RR based on soft setup quality
+            if score >= 70:
                 rr = 2.0
-            elif score >= 60:
+            elif score >= 45:
                 rr = 1.75
             else:
                 rr = 1.5
 
-        # ==========================================================
-        # LONG
-        # ==========================================================
-
-        if trend_bull:
-
-            swing_low = df_5m["low"].iloc[-8:-1].min()
-
-            sl = min(
-                swing_low * 0.9995,
-                entry - atr * sl_multiplier
-            )
-
-            tp = entry + ((entry - sl) * rr)
-
-        # ==========================================================
-        # SHORT
-        # ==========================================================
-
-        elif trend_bear:
-
-            swing_high = df_5m["high"].iloc[-8:-1].max()
-
-            sl = max(
-                swing_high * 1.0005,
-                entry + atr * sl_multiplier
-            )
-
-            tp = entry - ((sl - entry) * rr)
-
-        else:
-
+        # Soft gate early: no HTF bias → no trade. Limit mode only needs a
+        # minimal edge score, not full confluence alignment.
+        if not trend_bull and not trend_bear:
             return None
 
-        # ==========================================================
-        # Retrace limit entry price
-        # ----------------------------------------------------------
-        # SMC methodology enters on the RETRACEMENT into the imbalance, not by
-        # chasing the close of the displacement candle (the worst price of the
-        # move). Preferred level: the FVG midpoint when a gap exists; fallback:
-        # an ATR-fraction pullback. Clamped to stay meaningfully above the stop
-        # (>= 25% of the risk distance) and on the entry side of price.
-        # main.py uses this when ENTRY_MODE="limit"; "market" ignores it.
-        # ==========================================================
+        if ENTRY_MODE == "limit" and score < LIMIT_MIN_SETUP_SCORE:
+            return None
 
-        if trend_bull:
-            if bull_fvg:
-                gap_bottom = float(df_5m["high"].iloc[-3])
-                gap_top = float(df_5m["low"].iloc[-1])
-                limit_price = (gap_bottom + gap_top) / 2
-            else:
-                limit_price = entry - atr * RETRACE_ATR_FRACTION
-            limit_price = min(limit_price, entry)
-            limit_price = max(limit_price, sl + 0.25 * (entry - sl))
+        direction = "LONG" if trend_bull else "SHORT"
+
+        # Structure stop from signal close first (risk geometry).
+        sl, structure_swing = compute_structure_stop(direction, df_5m, entry, atr)
+
+        if direction == "LONG":
+            tp = entry + ((entry - sl) * rr)
         else:
-            if bear_fvg:
-                gap_top = float(df_5m["low"].iloc[-3])
-                gap_bottom = float(df_5m["high"].iloc[-1])
-                limit_price = (gap_top + gap_bottom) / 2
+            tp = entry - ((sl - entry) * rr)
+
+        # ==========================================================
+        # Prediction limit zone (OB / FVG / ATR pullback)
+        # ----------------------------------------------------------
+        # Desk behaviour: identify the zone, rest a limit, wait. Not chase
+        # the displacement close. main.py uses limit_price when ENTRY_MODE
+        # is "limit"; market mode keeps the signal close as entry.
+        # ==========================================================
+
+        limit_price, zone_type = choose_limit_zone(
+            direction, entry, sl, atr, df_5m, bull_fvg, bear_fvg
+        )
+
+        # Recompute SL/TP at the *limit* so risk is measured from where we
+        # actually intend to get filled (not the chase price).
+        if ENTRY_MODE == "limit":
+            sl, structure_swing = compute_structure_stop(
+                direction, df_5m, limit_price, atr
+            )
+            if direction == "LONG":
+                sl = min(sl, limit_price - atr * MIN_SL_ATR * 0.85)
+                tp = limit_price + ((limit_price - sl) * rr)
             else:
-                limit_price = entry + atr * RETRACE_ATR_FRACTION
-            limit_price = max(limit_price, entry)
-            limit_price = min(limit_price, sl - 0.25 * (sl - entry))
+                sl = max(sl, limit_price + atr * MIN_SL_ATR * 0.85)
+                tp = limit_price - ((sl - limit_price) * rr)
+            invalidation_price = float(structure_swing)
+            trade_entry = float(limit_price)
+        else:
+            invalidation_price = float(structure_swing)
+            trade_entry = float(entry)
 
         # ==========================================================
-        # Risk Metrics
+        # Risk Metrics (from the economics we will actually trade)
         # ==========================================================
 
-        risk_pct = abs(entry - sl) / max(entry, 0.0001)
+        risk_pct = abs(trade_entry - sl) / max(trade_entry, 0.0001)
 
-        reward_pct = abs(tp - entry) / max(entry, 0.0001)
+        reward_pct = abs(tp - trade_entry) / max(trade_entry, 0.0001)
 
         adversity_ratio = (
             risk_pct /
@@ -496,9 +672,9 @@ def get_signal(symbol, df_15m, df_5m):
         )
 
         risk_reward = (
-            abs(tp - entry)
+            abs(tp - trade_entry)
             /
-            max(abs(entry - sl), 0.0001)
+            max(abs(trade_entry - sl), 0.0001)
         )
 
         # ==========================================================
@@ -508,14 +684,20 @@ def get_signal(symbol, df_15m, df_5m):
         # training and inference can never drift apart.
         # ==========================================================
 
-        direction = "LONG" if trend_bull else "SHORT"
-
+        # Diagnostic fields (zone_type / invalidation / structure_swing /
+        # setup_score) are ignored by the featurizer — keeps train/serve
+        # feature contract stable. Do NOT add them as model features here.
         signal_snapshot = {
             "symbol": symbol,
             "direction": direction,
             "entry": entry,
+            "signal_close": float(entry),
             "sl": float(sl),
             "tp": float(tp),
+            "structure_swing": float(structure_swing),
+            "invalidation_price": float(invalidation_price),
+            "zone_type": zone_type,
+            "setup_score": int(score),
             "volume_spike": int(latest["volume_spike"]),
             "displacement": int(latest["displacement"]),
             "sweep": int(bull_sweep if trend_bull else bear_sweep),
@@ -576,22 +758,22 @@ def get_signal(symbol, df_15m, df_5m):
         # Confidence Engine
         # ==========================================================
 
+        n_real_closed = len([
+            t for t in history
+            if t.get("status") in ("WIN", "LOSS")
+            and t.get("source", "live") != "backtest"
+        ])
+
         if USE_XGBOOST:
 
-            # AI Mode: blend SMC score with the model probability, and require a
-            # confidence that adapts to market conditions (looser in clean
-            # trends, stricter in chop/high-vol and after a losing run) instead
-            # of a hardcoded constant.
+            # AI Mode: blend soft SMC score with the model probability.
+            # Limit mode uses a lower dynamic floor so predictions can rest;
+            # expected-R (when live sample is large enough) still filters.
             #
             # The model's vote is scaled by how many REAL closed trades it has
             # learned from (ai_blend_weight): a 42-trade model gets ~4% say,
             # not the full 40% — trust is earned with sample size, not granted
             # the moment a model file exists.
-            n_real_closed = len([
-                t for t in history
-                if t.get("status") in ("WIN", "LOSS")
-                and t.get("source", "live") != "backtest"
-            ])
             ai_weight = ai_blend_weight(n_real_closed)
 
             final_confidence = int(
@@ -603,22 +785,32 @@ def get_signal(symbol, df_15m, df_5m):
                 regime=market_regime,
                 atr_percentile=atr_percentile,
                 recent_win_rate=context.get("recent_win_rate", 0.5),
+                entry_mode=ENTRY_MODE,
             )
 
         else:
 
-            # Pure SMC Mode
-            # Generate more trades for AI training
+            # Pure SMC: limit mode places predictions with a soft bar;
+            # market mode keeps the stricter CONFIDENCE_REQUIRED_SMC.
             final_confidence = score
+            confidence_required = (
+                CONFIDENCE_REQUIRED_LIMIT
+                if ENTRY_MODE == "limit"
+                else CONFIDENCE_REQUIRED_SMC
+            )
 
-            confidence_required = CONFIDENCE_REQUIRED_SMC
-
-        # Confidence Bonus: reward setups with multiple confluences
+        # Confidence bonus: reward stacked edges (not required)
         if (bull_sweep and bull_fvg) or (bear_sweep and bear_fvg):
             final_confidence += 5
 
         if latest["volume_spike"] and latest["displacement"]:
             final_confidence += 5
+
+        if (bull_crt and bull_sweep) or (bear_crt and bear_sweep):
+            final_confidence += 4
+
+        if zone_type in ("order_block", "fvg"):
+            final_confidence += 3
 
         final_confidence = max(
             0,
@@ -638,11 +830,12 @@ def get_signal(symbol, df_15m, df_5m):
             "D" if latest["displacement"] else "-",
             "S" if (bull_sweep or bear_sweep) else "-",
             "F" if (bull_fvg or bear_fvg) else "-",
+            "C" if (bull_crt or bear_crt) else "-",
         ])
         passed = final_confidence >= confidence_required
         logger.info(
             f"{'🎯' if passed else '·'} {symbol} {direction} "
-            f"| smc {score} [{confluences}] "
+            f"| smc {score} [{confluences}] zone={zone_type} "
             f"| ai {ai_prob:.0f}%@{ai_weight:.0%} "
             f"| conf {final_confidence}/{confidence_required} "
             f"| rr {risk_reward:.1f} | {market_regime}"

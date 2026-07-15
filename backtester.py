@@ -33,6 +33,7 @@ from config import (
     SLIPPAGE_PCT,
     MAKER_FEE_RATE,
     TAKER_FEE_RATE,
+    INVALIDATE_PENDING_ON_STRUCTURE,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,12 +43,25 @@ WINDOW = 250               # rolling df length handed to get_signal
 LIMIT_TTL_BARS = max(1, int(LIMIT_TTL_MINUTES / 5))  # 5m bars per resting order
 
 
-def _simulate_limit_fill(direction, limit_price, highs, lows, ttl_bars):
+def _simulate_limit_fill(
+    direction,
+    limit_price,
+    highs,
+    lows,
+    ttl_bars,
+    invalidation_price=None,
+):
     """Walk forward up to ttl_bars looking for price to trade through the
     resting limit level. Returns the 0-based bar offset of the fill, or None
-    if the order expires unfilled (the runner left without us — the accepted
-    cost of retrace entries)."""
+    if the order expires unfilled or structure invalidates first (mirrors
+    live trade_monitor behaviour)."""
+    inv = invalidation_price
     for k in range(min(ttl_bars, len(highs))):
+        if INVALIDATE_PENDING_ON_STRUCTURE and inv is not None:
+            if direction == "LONG" and lows[k] < float(inv):
+                return None
+            if direction == "SHORT" and highs[k] > float(inv):
+                return None
         if direction == "LONG" and lows[k] <= limit_price:
             return k
         if direction == "SHORT" and highs[k] >= limit_price:
@@ -158,14 +172,28 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False, context_provider=None):
             fill_offset = 0  # bars between signal and actual entry
 
             if ENTRY_MODE == "limit":
-                # Mirror live behavior: rest at the retrace level, wait for a
-                # touch, expire unfilled orders after the TTL. Limit fills get
-                # NO adverse slippage — that's the whole point of them.
+                # Mirror live behavior: rest at the prediction zone, wait for a
+                # touch, expire unfilled orders after the TTL, cancel if
+                # structure invalidates. Limit fills get NO adverse slippage.
                 entry = float(signal.get("limit_price", signal["entry"]))
-                rr = float(signal.get("rr_multiplier", 1.5))
-                tp = entry + (entry - sl) * rr if direction == "LONG" else entry - (sl - entry) * rr
+                # Prefer the SL/TP already re-anchored to the limit in strategy.
+                sl = float(signal.get("sl", sl))
+                tp = float(signal.get("tp", entry))
+                if abs(tp - entry) < 1e-12:
+                    rr = float(signal.get("rr_multiplier", 1.5))
+                    tp = (
+                        entry + (entry - sl) * rr
+                        if direction == "LONG"
+                        else entry - (sl - entry) * rr
+                    )
+                inv = signal.get("invalidation_price", signal.get("structure_swing"))
                 touched = _simulate_limit_fill(
-                    direction, entry, highs[i + 1:], lows[i + 1:], LIMIT_TTL_BARS
+                    direction,
+                    entry,
+                    highs[i + 1:],
+                    lows[i + 1:],
+                    LIMIT_TTL_BARS,
+                    invalidation_price=inv,
                 )
                 if touched is None:
                     unfilled += 1

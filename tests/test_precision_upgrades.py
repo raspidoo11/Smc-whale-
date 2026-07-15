@@ -108,9 +108,16 @@ async def _noop_alert(msg):
 
 def _pending_trade(direction="LONG", limit=99.0, minutes_ago=0):
     placed = datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)
+    # SL / invalidation on the correct side of the limit so structure
+    # invalidation never false-cancels healthy pending orders.
+    if direction == "LONG":
+        sl, inv, tp = 97.0, 97.5, 103.0
+    else:
+        sl, inv, tp = 103.0, 102.5, 97.0
     return {
         "symbol": "BTC/USDT:USDT", "direction": direction, "status": "PENDING",
-        "entry": limit, "sl": 97.0, "tp": 103.0, "qty": 1.0, "trade_no": 7,
+        "entry": limit, "sl": sl, "tp": tp, "qty": 1.0, "trade_no": 7,
+        "invalidation_price": inv, "structure_swing": inv,
         "placed_at": placed.isoformat(),
     }
 

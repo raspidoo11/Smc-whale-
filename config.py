@@ -80,18 +80,36 @@ TRAIL_ACTIVATION_RATIO = float(os.getenv("TRAIL_ACTIVATION_RATIO", 0.90))
 TRAIL_PERCENT = float(os.getenv("TRAIL_PERCENT", 0.3))
 
 # ==========================================================
-# Entry execution — retrace limit entries vs chase-at-market
+# Entry execution — prediction limits vs chase-at-market
 # ==========================================================
-# "limit"  : place a limit order at the retracement level (FVG midpoint when a
-#            fair value gap exists, else an ATR-fraction pullback) and wait for
-#            price to come back to us. Better fills, but some runners leave
-#            without filling.
+# "limit"  : rest a GTC limit at a predicted institutional zone (order block,
+#            FVG mid, or ATR pullback) and WAIT for price to come to us — desk
+#            behaviour, not chase-the-close.
 # "market" : legacy behavior — enter at the signal candle's close immediately.
 ENTRY_MODE = os.getenv("ENTRY_MODE", "limit").lower()
-# Fallback retrace depth when no FVG exists: limit = entry -/+ RETRACE_ATR_FRACTION * ATR.
-RETRACE_ATR_FRACTION = float(os.getenv("RETRACE_ATR_FRACTION", 0.35))
-# Cancel an unfilled limit order after this many minutes (6 x 5m candles).
-LIMIT_TTL_MINUTES = float(os.getenv("LIMIT_TTL_MINUTES", 30))
+# Fallback retrace depth when no FVG/OB exists: limit = close -/+ fraction*ATR.
+RETRACE_ATR_FRACTION = float(os.getenv("RETRACE_ATR_FRACTION", 0.45))
+# How long an unfilled prediction may rest. 30m was cancelling good limits
+# before the pullback arrived; desks wait for the level (default 3h).
+LIMIT_TTL_MINUTES = float(os.getenv("LIMIT_TTL_MINUTES", 180))
+# Cancel a resting limit if price trades through the invalidation level
+# (structure broken) before fill — avoids filling into a failed setup.
+INVALIDATE_PENDING_ON_STRUCTURE = (
+    os.getenv("INVALIDATE_PENDING_ON_STRUCTURE", "true").lower() == "true"
+)
+
+# ==========================================================
+# Stop placement (anti stop-hunt)
+# ==========================================================
+# Old logic took a tight ATR multiple (0.7–1.0×) or a swing * 0.9995 — both
+# sit inside the noise that sweeps equal highs/lows. New policy:
+#   SL = beyond structural swing + buffer, AND at least MIN_SL_ATR from entry.
+# That is the *wider* of the two constraints (more room), never the tighter.
+MIN_SL_ATR = float(os.getenv("MIN_SL_ATR", 1.15))
+# Extra room past the swing so a wick through equal lows/highs doesn't tag SL.
+STRUCTURE_SL_BUFFER_ATR = float(os.getenv("STRUCTURE_SL_BUFFER_ATR", 0.25))
+# Structural swing lookback in entry-TF bars (20 × 5m ≈ 100m of structure).
+STRUCTURE_SWING_LOOKBACK = int(os.getenv("STRUCTURE_SWING_LOOKBACK", 20))
 
 # ==========================================================
 # Entry quality gates
@@ -99,8 +117,13 @@ LIMIT_TTL_MINUTES = float(os.getenv("LIMIT_TTL_MINUTES", 30))
 # Skip entries when the bid-ask spread eats too much of the planned risk:
 # reject if spread > SPREAD_MAX_FRACTION_OF_RISK * |entry - sl|.
 SPREAD_MAX_FRACTION_OF_RISK = float(os.getenv("SPREAD_MAX_FRACTION_OF_RISK", 0.15))
-# Pure-SMC-mode confidence bar (AI mode uses the dynamic threshold).
+# Pure-SMC confidence bar when chasing at market. Limit mode uses the softer
+# CONFIDENCE_REQUIRED_LIMIT so a prediction can rest without every confluence
+# firing on the same candle.
 CONFIDENCE_REQUIRED_SMC = int(os.getenv("CONFIDENCE_REQUIRED_SMC", 40))
+CONFIDENCE_REQUIRED_LIMIT = int(os.getenv("CONFIDENCE_REQUIRED_LIMIT", 28))
+# Minimum soft setup score to even place a prediction limit (HTF bias + edge).
+LIMIT_MIN_SETUP_SCORE = int(os.getenv("LIMIT_MIN_SETUP_SCORE", 20))
 # Pause entries around scheduled high-impact macro events (news_filter.py).
 # Off by default: the built-in calendar is approximate — enable once you've
 # reviewed/edited the event windows there.

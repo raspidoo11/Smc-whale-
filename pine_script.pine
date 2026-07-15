@@ -1,33 +1,35 @@
 // This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © graphicsperry01
+//
+// Mirrors strategy.py pure-SMC path (USE_XGBOOST=false defaults):
+//   * soft institutional score (bias + edges; vol/disp are bonuses)
+//   * recent liquidity sweeps (not same-bar only)
+//   * open FVG lookback + CRT (1H sweep-reclaim)
+//   * structure SL: beyond swing + buffer AND min ATR floor (anti stop-hunt)
+//   * prediction limit zones: deepest valid of OB mid / FVG mid / ATR pullback
+//   * soft confidence bar for Limit mode; stricter for Market mode
+// XGBoost / expected-R cannot run in Pine — confidence is pure SMC + bonuses.
 
 //@version=6
 indicator("SMC Whale AI", overlay = true, max_labels_count = 500, max_boxes_count = 500, max_lines_count = 500)
 
 //====================================================
-// PART 1 -- INPUTS
+// PART 1 -- INPUTS  (defaults match config.py)
 //====================================================
 
 // Trading mode.
-//   Auto   : entry = your CURRENT chart TF, trend = next HTF up. Just switch
-//            the chart (5m to scalp, 15m to day-trade, 30m/1H to swing) and the
-//            indicator follows — no timeframe warning. This is the default.
-//   Scalp  : 15m trend / 5m entry     (fixed)
-//   Day    : 1H  trend / 15m entry    (fixed)
-//   Swing  : 4H  trend / 30m entry    (fixed)
-//   Custom : use the two "Custom ... TF" fields below.
-// IMPORTANT: the Custom TF fields ONLY apply when Mode = "Custom". In any other
-// mode they are ignored (this is what trips people up).
+//   Auto   : entry = CURRENT chart TF, trend = next HTF up.
+//   Scalp  : 15m trend / 5m entry     (bot default SCAN stack)
+//   Day    : 1H  trend / 15m entry
+//   Swing  : 4H  trend / 30m entry
+//   Custom : use the two Custom TF fields (ignored otherwise).
 tradeMode = input.string("Auto", "Trading Mode", options = ["Auto", "Scalp", "Day", "Swing", "Custom"], group = "Timeframes",
-     tooltip = "Auto = entry matches your current chart, trend = next HTF up (switch charts freely, no warning).\nScalp = 15m/5m · Day = 1H/15m · Swing = 4H/30m.\nCustom = use the two fields below — these are IGNORED unless Mode is Custom.")
+     tooltip = "Auto = entry matches chart, trend = next HTF.\nScalp = 15m/5m · Day = 1H/15m · Swing = 4H/30m.\nCustom = fields below only.")
 
 customTrendTF = input.timeframe("15", "Custom Trend TF (Custom mode only)", group = "Timeframes")
 customEntryTF = input.timeframe("5", "Custom Entry TF (Custom mode only)", group = "Timeframes")
 
-// Chart timeframe in seconds — drives Auto mode and the TF guard below.
 chartSecs = timeframe.in_seconds()
-
-// Auto: entry = chart TF, trend = a sensible higher timeframe for it.
 autoEntryTF = timeframe.period
 autoTrendTF = chartSecs <= 60 ? "5" : chartSecs <= 300 ? "15" : chartSecs <= 900 ? "60" : chartSecs <= 3600 ? "240" : chartSecs <= 14400 ? "D" : "W"
 
@@ -39,36 +41,47 @@ showSignals   = input.bool(true, "Signals", group = "Display")
 showBOS       = input.bool(true, "Break of Structure", group = "Display")
 showFVG       = input.bool(true, "Fair Value Gaps", group = "Display")
 showLiquidity = input.bool(true, "Liquidity Sweeps", group = "Display")
-showLevels    = input.bool(true, "Entry / SL / TP", group = "Display")
+showLevels    = input.bool(true, "Entry / SL / TP / Invalidation", group = "Display")
 showOB        = input.bool(true, "Order Blocks", group = "Display")
 showPD        = input.bool(true, "Premium / Discount Zones", group = "Display")
 showEQ        = input.bool(true, "Equal Highs / Lows", group = "Display")
 showKillzones = input.bool(true, "Killzones", group = "Display")
 showHeatmap   = input.bool(true, "Liquidity Heatmap", group = "Display")
-showAIBar     = input.bool(true, "AI-Style Confidence Bar", group = "Display")
+showAIBar     = input.bool(true, "Confidence Bar", group = "Display")
+showCRT       = input.bool(true, "CRT Markers", group = "Display")
 
+// ---- Structure (strategy.py BOS defaults) ----
 structureLookback = input.int(10, "BOS Structure Lookback", group = "Structure")
 confirmCandles    = input.int(2, "BOS Confirm Candles", group = "Structure")
 internalLookback  = input.int(5, "Internal BOS Lookback", group = "Structure")
 internalConfirm   = input.int(1, "Internal BOS Confirm Candles", group = "Structure")
 
-// NOTE: your Python bot's default running mode is USE_XGBOOST=false ("pure SMC" mode).
-// displacementATR is corrected to 0.50 to match that mode (0.70 is the AI-mode value).
-displacementATR = input.float(0.50, "Displacement ATR Multiplier", group = "Structure")
-confidenceRequired = input.int(40, "Minimum Confidence To Signal", group = "Structure")
+// Pure-SMC displacement (config / strategy: 0.50 when USE_XGBOOST=false)
+displacementATR = input.float(0.50, "Displacement ATR Multiplier", group = "Structure", step = 0.05)
 
-// Mirror of the Python bot's ENTRY_MODE. "Limit (retrace)" draws the resting
-// limit level the bot would place (FVG midpoint when a gap exists, else an
-// ATR-fraction pullback) with TP re-derived from that entry; "Market (close)"
-// is the legacy chase-at-close view.
-entryMode  = input.string("Limit (retrace)", "Entry Mode", options = ["Limit (retrace)", "Market (close)"], group = "Structure")
-retraceATR = input.float(0.35, "Retrace Depth (xATR, no-FVG fallback)", group = "Structure", step = 0.05)
+// ---- Entry mode + soft gates (config.py) ----
+entryMode = input.string("Limit (prediction)", "Entry Mode",
+     options = ["Limit (prediction)", "Market (close)"], group = "Entry / Limits",
+     tooltip = "Limit = rest at OB/FVG/ATR zone (bot ENTRY_MODE=limit).\nMarket = chase signal close.")
+retraceATR = input.float(0.45, "Retrace Depth (xATR, no-FVG/OB fallback)", group = "Entry / Limits", step = 0.05)
+confLimit  = input.int(28, "Confidence Required (Limit mode)", group = "Entry / Limits",
+     tooltip = "CONFIDENCE_REQUIRED_LIMIT — softer so predictions can rest.")
+confMarket = input.int(40, "Confidence Required (Market mode)", group = "Entry / Limits",
+     tooltip = "CONFIDENCE_REQUIRED_SMC")
+minSetupScore = input.int(20, "Min Soft Setup Score (Limit mode)", group = "Entry / Limits",
+     tooltip = "LIMIT_MIN_SETUP_SCORE — HTF bias + at least one edge.")
 
-pdLookback    = input.int(50, "Premium/Discount Range Lookback", group = "Premium/Discount")
-pivotBars     = input.int(3, "Pivot Bars (Equal Highs/Lows)", group = "Liquidity")
+// ---- Anti stop-hunt (config.py) ----
+minSlAtr = input.float(1.15, "Min SL Distance (xATR)", group = "Stop Placement", step = 0.05)
+structSlBufferAtr = input.float(0.25, "Structure SL Buffer (xATR)", group = "Stop Placement", step = 0.05)
+structSwingLookback = input.int(20, "Structure Swing Lookback (bars)", group = "Stop Placement")
+
+// ---- Display-only extras (not part of bot signal gate) ----
+pdLookback     = input.int(50, "Premium/Discount Range Lookback", group = "Premium/Discount")
+pivotBars      = input.int(3, "Pivot Bars (Equal Highs/Lows)", group = "Liquidity")
 eqTolerancePct = input.float(0.05, "Equal High/Low Tolerance %", group = "Liquidity") / 100
-obExtendBars  = input.int(20, "Order Block Box Length (bars)", group = "Order Blocks")
-maxOBBoxes    = input.int(8, "Max Order Blocks Shown", group = "Order Blocks")
+obExtendBars   = input.int(20, "Order Block Box Length (bars)", group = "Order Blocks")
+maxOBBoxes     = input.int(8, "Max Order Blocks Shown", group = "Order Blocks")
 
 //====================================================
 // COLORS
@@ -77,19 +90,17 @@ maxOBBoxes    = input.int(8, "Max Order Blocks Shown", group = "Order Blocks")
 bullColor    = color.new(color.lime, 0)
 bearColor    = color.new(color.red, 0)
 neutralColor = color.new(color.gray, 60)
+limitColor   = color.new(color.blue, 0)
+invColor     = color.new(color.orange, 0)
 
-// Pretty timeframe label for the dashboard: "60" -> "1H", "240" -> "4H". Passes
-// through non-minute periods (timeframe.period style "1D"/"1W"/"1S") unchanged.
 f_tfLabel(tf) =>
     str.contains(tf, "D") or str.contains(tf, "W") or str.contains(tf, "M") or str.contains(tf, "S") ? tf : tf == "60" ? "1H" : tf == "120" ? "2H" : tf == "180" ? "3H" : tf == "240" ? "4H" : tf + "m"
 
 //====================================================
-// PART 2 -- HTF STRUCTURE FUNCTION (External / Trend BOS)
+// PART 2 -- HTF BOS  (bullish_bos / bearish_bos)
 //====================================================
-// Mirrors strategy.py bullish_bos() / bearish_bos(): structure window
-// excludes the most recent `confirm` candles, swing level = extreme of
-// that window, ALL of the last `confirm` candles must CLOSE beyond it.
-// Reused below for internal (minor) structure too, with a smaller lookback.
+// structure window excludes last `confirm` candles; ALL confirm closes
+// must be beyond the swing (not wick-only).
 
 f_htf_bos(lookback, confirm) =>
     swingHigh = ta.highest(high[confirm], lookback)
@@ -102,102 +113,281 @@ f_htf_bos(lookback, confirm) =>
     [bullBOS, bearBOS]
 
 [trendBull, trendBear] = request.security(
-     syminfo.tickerid, trendTF, f_htf_bos(structureLookback, confirmCandles))
+     syminfo.tickerid, trendTF, f_htf_bos(structureLookback, confirmCandles), barmerge.gaps_off, barmerge.lookahead_off)
 
-// Internal (minor) structure runs on the entry timeframe with a tighter
-// lookback -- this is what feeds CHoCH detection below.
 [internalBullRaw, internalBearRaw] = request.security(
-     syminfo.tickerid, entryTF, f_htf_bos(internalLookback, internalConfirm))
+     syminfo.tickerid, entryTF, f_htf_bos(internalLookback, internalConfirm), barmerge.gaps_off, barmerge.lookahead_off)
 
 //====================================================
-// PART 2 -- ENTRY TF FUNCTION (Volume Spike, Displacement, ATR,
-// Liquidity Sweep, Fair Value Gap)
+// PART 2 -- ENTRY TF CORE
+// volume spike, displacement, same-bar + recent sweep, FVG (+ open gaps),
+// CRT, order-block mid, structure swing, regime
 //====================================================
 
-f_entry_core(dispMult) =>
-    // matches Python exactly: (high - low).rolling(14).mean(),
-    // NOT Wilder's true range (ta.atr) -- kept identical on purpose.
+f_entry_core(dispMult, sweepLookback, sweepSwingWin, obLookback, structLb) =>
+    // ATR = (high-low).rolling(14).mean() — NOT Wilder ta.atr (matches Python)
     atrVal = ta.sma(high - low, 14)
     volMA = ta.sma(volume, 20)
     atrAvgLocal = ta.sma(atrVal, 30)
 
-    // adaptive volume multiplier (pure SMC / non-XGBoost mode)
+    // adaptive volume multiplier (pure SMC / non-XGBoost)
     volMult = atrVal > atrAvgLocal * 1.3 ? 1.15 : 1.30
-
     volSpike = volume > volMA * volMult
     body = math.abs(close - open)
     displacementFlag = body > atrVal * dispMult
 
+    // Same-bar sweep (strategy: iloc[-10:-1] → 9 bars before current)
     swingLowEntry  = ta.lowest(low[1], 9)
     swingHighEntry = ta.highest(high[1], 9)
+    bullSweepNow = low <= swingLowEntry * 1.0002 and close > open
+    bearSweepNow = high >= swingHighEntry * 0.9998 and close < open
 
-    bullSweep = low <= swingLowEntry * 1.0002 and close > open
-    bearSweep = high >= swingHighEntry * 0.9998 and close < open
+    // recent_liquidity_sweep(lookback=8, swing_window=12)
+    bool bullSweepRecent = false
+    bool bearSweepRecent = false
+    for i = 1 to sweepLookback
+        winLow  = ta.lowest(low[i + 1], sweepSwingWin)
+        winHigh = ta.highest(high[i + 1], sweepSwingWin)
+        if low[i] < winLow and close[i] > open[i]
+            bullSweepRecent := true
+        if high[i] > winHigh and close[i] < open[i]
+            bearSweepRecent := true
+    bullSweep = bullSweepNow or bullSweepRecent
+    bearSweep = bearSweepNow or bearSweepRecent
 
-    bullFvg = low > high[2]
-    bearFvg = high < low[2]
+    // Current-bar FVG
+    bullFvgNow = low > high[2]
+    bearFvgNow = high < low[2]
+    // Still-open prior FVG (k in 2..4) — strategy.py open-gap scan
+    bool bullFvgOpen = false
+    bool bearFvgOpen = false
+    for k = 2 to 4
+        // gap between bar[k] low and bar[k+2] high (bullish imbalance)
+        if low[k] > high[k + 2] and close > high[k + 2]
+            bullFvgOpen := true
+        if high[k] < low[k + 2] and close < low[k + 2]
+            bearFvgOpen := true
+    bullFvg = bullFvgNow or bullFvgOpen
+    bearFvg = bearFvgNow or bearFvgOpen
 
-    // FVG midpoints — the preferred resting-limit level when a gap exists
-    // (matches strategy.py: midpoint of the gap between high[-3] and low[-1]).
-    bullFvgMid = (high[2] + low) / 2
-    bearFvgMid = (low[2] + high) / 2
+    // FVG mid for zone choice (current gap geometry, matches high[-3]/low[-1])
+    bullFvgMid = (high[2] + low) / 2.0
+    bearFvgMid = (low[2] + high) / 2.0
 
-    // Market regime, mirroring strategy.py / xgboost_trainer.detect_market_regime():
-    // volatile if ATR > avg*1.4, else trending if 30-bar price move > 4%, else ranging.
-    // 2 = volatile, 1 = trending, 0 = ranging.
+    // find_order_block: walk last obLookback bars (exclude signal bar)
+    // LONG → last bearish candle before bullish impulse; mid = (open+low)/2
+    // SHORT → last bullish candle before bearish impulse; mid = (open+high)/2
+    float obLongMid = na
+    float obShortMid = na
+    bool foundLongOB = false
+    bool foundShortOB = false
+    for i = 1 to obLookback
+        // impulse at bar[i], opposing candle at bar[i+1] (older)
+        bodyI = math.abs(close[i] - open[i])
+        atrI = (high[i] - low[i])  // local bar range proxy; impulse vs 0.55*ATR
+        // Prefer rolling ATR if available on this offset
+        atrRoll = ta.sma(high - low, 14)
+        atrUse = na(atrRoll[i]) or atrRoll[i] <= 0 ? math.max(bodyI, atrI) : atrRoll[i]
+        if not foundLongOB and close[i] > open[i] and bodyI > atrUse * 0.55 and close[i + 1] < open[i + 1]
+            obLongMid := (open[i + 1] + low[i + 1]) / 2.0
+            foundLongOB := true
+        if not foundShortOB and close[i] < open[i] and bodyI > atrUse * 0.55 and close[i + 1] > open[i + 1]
+            obShortMid := (open[i + 1] + high[i + 1]) / 2.0
+            foundShortOB := true
+
+    // Structure swing for SL (exclude signal bar): iloc[-(lookback+1):-1]
+    structSwingLow  = ta.lowest(low[1], structLb)
+    structSwingHigh = ta.highest(high[1], structLb)
+
+    // detect_market_regime: volatile if ATR>avg*1.4 else trending if 30-bar move>4%
     priceChange = na(close[30]) ? 0.0 : math.abs(close - close[30]) / close[30]
     regimeCode = atrVal > atrAvgLocal * 1.4 ? 2 : priceChange > 0.04 ? 1 : 0
 
-    [volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, atrVal, atrAvgLocal, regimeCode, bullFvgMid, bearFvgMid]
-
-[volSpike, displacementFlag, bullSweep, bearSweep, bullFvg, bearFvg, entryATR, entryATRAvg, regimeCode, bullFvgMid, bearFvgMid] =
-     request.security(syminfo.tickerid, entryTF, f_entry_core(displacementATR))
-
-// Second entry-TF helper: order block anchor candle + SL/TP swing levels
-// (matches strategy.py's iloc[-8:-1] window used for stop placement)
-
-f_entry_extra() =>
+    // OB anchor for drawing boxes (last opposing candle before current impulse)
     obBullCandle = close > open and close[1] < open[1]
     obBearCandle = close < open and close[1] > open[1]
     obHigh = high[1]
     obLow  = low[1]
-    swingLow8  = ta.lowest(low[1], 8)
-    swingHigh8 = ta.highest(high[1], 8)
-    [obBullCandle, obBearCandle, obHigh, obLow, swingLow8, swingHigh8]
 
-[obBullCandle, obBearCandle, obHigh, obLow, swingLow8, swingHigh8] =
-     request.security(syminfo.tickerid, entryTF, f_entry_extra())
+    [volSpike, displacementFlag, bullSweep, bearSweep, bullSweepNow, bearSweepNow,
+     bullFvg, bearFvg, bullFvgMid, bearFvgMid,
+     atrVal, atrAvgLocal, regimeCode,
+     obLongMid, obShortMid, foundLongOB, foundShortOB,
+     structSwingLow, structSwingHigh,
+     obBullCandle, obBearCandle, obHigh, obLow]
+
+[volSpike, displacementFlag, bullSweep, bearSweep, bullSweepNow, bearSweepNow,
+ bullFvg, bearFvg, bullFvgMid, bearFvgMid,
+ entryATR, entryATRAvg, regimeCode,
+ obLongMid, obShortMid, foundLongOB, foundShortOB,
+ structSwingLow, structSwingHigh,
+ obBullCandle, obBearCandle, obHigh, obLow] =
+     request.security(syminfo.tickerid, entryTF,
+          f_entry_core(displacementATR, 8, 12, 15, structSwingLookback),
+          barmerge.gaps_off, barmerge.lookahead_off)
+
+// CRT on 1H: cur hour sweeps prior completed hour's extreme + reclaim
+// (crt_flags in strategy.py)
+prevH1Low  = request.security(syminfo.tickerid, "60", low[1],  barmerge.gaps_off, barmerge.lookahead_off)
+prevH1High = request.security(syminfo.tickerid, "60", high[1], barmerge.gaps_off, barmerge.lookahead_off)
+curH1Low   = request.security(syminfo.tickerid, "60", low,     barmerge.gaps_off, barmerge.lookahead_off)
+curH1High  = request.security(syminfo.tickerid, "60", high,    barmerge.gaps_off, barmerge.lookahead_off)
+// close from entry TF (latest close)
+entryClose = request.security(syminfo.tickerid, entryTF, close, barmerge.gaps_off, barmerge.lookahead_off)
+bullCrt = curH1Low < prevH1Low and entryClose > prevH1Low
+bearCrt = curH1High > prevH1High and entryClose < prevH1High
 
 //====================================================
-// PART 2 -- SMC SCORE (0-105) & CONFIDENCE
+// PART 2 -- SOFT SMC SCORE  (strategy.py get_signal)
 //====================================================
-// Identical weighting to strategy.py's get_signal():
-// volume 25, displacement 25, trend 20, sweep 20, FVG 15
+// trend 20 | sweep 20 | FVG 15 | CRT 15 | vol 15 | disp 15 | OB 10
+// max theoretical = 110
 
 smcScore = 0
-smcScore := smcScore + (volSpike ? 25 : 0)
-smcScore := smcScore + (displacementFlag ? 25 : 0)
-smcScore := smcScore + (trendBull ? 20 : 0)
-smcScore := smcScore + (trendBear ? 20 : 0)
+smcScore := smcScore + ((trendBull or trendBear) ? 20 : 0)
 smcScore := smcScore + ((bullSweep or bearSweep) ? 20 : 0)
 smcScore := smcScore + ((bullFvg or bearFvg) ? 15 : 0)
+smcScore := smcScore + ((bullCrt or bearCrt) ? 15 : 0)
+smcScore := smcScore + (volSpike ? 15 : 0)
+smcScore := smcScore + (displacementFlag ? 15 : 0)
+smcScore := smcScore + (((trendBull and foundLongOB) or (trendBear and foundShortOB)) ? 10 : 0)
 
-// Pure SMC mode: final_confidence = score, plus the same two confluence
-// bonuses your bot applies, capped 0-100. (XGBoost probability blending
-// can't be reproduced -- no ML runtime inside Pine.)
+useLimit = entryMode == "Limit (prediction)"
+
+// RR from soft score (pure-SMC branch in strategy.py)
+rrValue = smcScore >= 70 ? 2.0 : smcScore >= 45 ? 1.75 : 1.5
+
+//====================================================
+// PART 2 -- STRUCTURE STOP + PREDICTION LIMIT ZONE
+//====================================================
+
+f_structure_stop_long(entryPx, atr, swingLow) =>
+    buffer = atr * structSlBufferAtr
+    floorDist = atr * minSlAtr
+    structureSl = swingLow - buffer
+    atrFloor = entryPx - floorDist
+    sl = math.min(structureSl, atrFloor)
+    sl := math.min(sl, entryPx - atr * 0.10)
+    sl
+
+f_structure_stop_short(entryPx, atr, swingHigh) =>
+    buffer = atr * structSlBufferAtr
+    floorDist = atr * minSlAtr
+    structureSl = swingHigh + buffer
+    atrFloor = entryPx + floorDist
+    sl = math.max(structureSl, atrFloor)
+    sl := math.max(sl, entryPx + atr * 0.10)
+    sl
+
+// Signal-close economics first
+signalClose = entryClose
+atrSafe = entryATR > 0 ? entryATR : 1.0
+
+longSL0  = f_structure_stop_long(signalClose, atrSafe, structSwingLow)
+shortSL0 = f_structure_stop_short(signalClose, atrSafe, structSwingHigh)
+
+// choose_limit_zone — deepest valid of OB / FVG / ATR pullback
+// LONG: pick lowest valid candidate; SHORT: highest valid
+f_choose_limit_long(entryPx, sl, atr, hasFvg, fvgMid, hasOb, obMid, retrace) =>
+    atrPull = entryPx - atr * retrace
+    minLimit = sl + 0.30 * (entryPx - sl)
+    float best = na
+    string zone = "atr_pullback"
+    // evaluate candidates (deeper = better for long)
+    if hasFvg and not na(fvgMid) and fvgMid >= minLimit and fvgMid <= entryPx
+        best := fvgMid
+        zone := "fvg"
+    if hasOb and not na(obMid) and obMid >= minLimit and obMid <= entryPx
+        if na(best) or obMid < best
+            best := obMid
+            zone := "order_block"
+    if atrPull >= minLimit and atrPull <= entryPx
+        if na(best) or atrPull < best
+            best := atrPull
+            zone := "atr_pullback"
+    if na(best)
+        best := math.max(minLimit, math.min(entryPx, entryPx - atr * 0.25))
+        zone := "atr_pullback"
+    best := math.min(best, entryPx)
+    best := math.max(best, minLimit)
+    [best, zone]
+
+f_choose_limit_short(entryPx, sl, atr, hasFvg, fvgMid, hasOb, obMid, retrace) =>
+    atrPull = entryPx + atr * retrace
+    maxLimit = sl - 0.30 * (sl - entryPx)
+    float best = na
+    string zone = "atr_pullback"
+    if hasFvg and not na(fvgMid) and fvgMid <= maxLimit and fvgMid >= entryPx
+        best := fvgMid
+        zone := "fvg"
+    if hasOb and not na(obMid) and obMid <= maxLimit and obMid >= entryPx
+        if na(best) or obMid > best
+            best := obMid
+            zone := "order_block"
+    if atrPull <= maxLimit and atrPull >= entryPx
+        if na(best) or atrPull > best
+            best := atrPull
+            zone := "atr_pullback"
+    if na(best)
+        best := math.min(maxLimit, math.max(entryPx, entryPx + atr * 0.25))
+        zone := "atr_pullback"
+    best := math.max(best, entryPx)
+    best := math.min(best, maxLimit)
+    [best, zone]
+
+[longLimit0, longZone0] = f_choose_limit_long(
+     signalClose, longSL0, atrSafe, bullFvg, bullFvgMid, foundLongOB, obLongMid, retraceATR)
+[shortLimit0, shortZone0] = f_choose_limit_short(
+     signalClose, shortSL0, atrSafe, bearFvg, bearFvgMid, foundShortOB, obShortMid, retraceATR)
+
+// Re-anchor SL/TP at the limit when in Limit mode (strategy.py)
+longLimit  = longLimit0
+shortLimit = shortLimit0
+longZone   = longZone0
+shortZone  = shortZone0
+
+longSL_re  = f_structure_stop_long(longLimit, atrSafe, structSwingLow)
+longSL_re  := math.min(longSL_re, longLimit - atrSafe * minSlAtr * 0.85)
+shortSL_re = f_structure_stop_short(shortLimit, atrSafe, structSwingHigh)
+shortSL_re := math.max(shortSL_re, shortLimit + atrSafe * minSlAtr * 0.85)
+
+longSL  = useLimit ? longSL_re : longSL0
+shortSL = useLimit ? shortSL_re : shortSL0
+
+longEntry  = useLimit ? longLimit : signalClose
+shortEntry = useLimit ? shortLimit : signalClose
+longTP  = longEntry + (longEntry - longSL) * rrValue
+shortTP = shortEntry - (shortSL - shortEntry) * rrValue
+
+// Invalidation = structure swing (monitor cancels pending if breached)
+longInv  = structSwingLow
+shortInv = structSwingHigh
+
+// Zone used for the active bias (for confidence bonus + dashboard)
+activeZone = trendBull ? longZone : trendBear ? shortZone : "—"
+
+//====================================================
+// PART 2 -- CONFIDENCE + SIGNAL GATE
+//====================================================
+
 confidence = smcScore
+// stacked-edge bonuses (strategy.py)
 confidence := confidence + (((bullSweep and bullFvg) or (bearSweep and bearFvg)) ? 5 : 0)
 confidence := confidence + ((volSpike and displacementFlag) ? 5 : 0)
+confidence := confidence + (((bullCrt and bullSweep) or (bearCrt and bearSweep)) ? 4 : 0)
+confidence := confidence + ((activeZone == "order_block" or activeZone == "fvg") ? 3 : 0)
 confidence := math.max(0, math.min(confidence, 100))
 
-longSignal  = trendBull and confidence >= confidenceRequired
-shortSignal = trendBear and confidence >= confidenceRequired
+confidenceRequired = useLimit ? confLimit : confMarket
 
-// Anti-repaint: only act on CONFIRMED bars. Without this, the developing
-// candle can flash a BUY/SELL intra-bar that vanishes by the close — the
-// same forming-candle bug that was fixed in the Python scanner (which now
-// drops the in-progress candle entirely). Historical bars are always
-// confirmed, so backtested markers are unchanged.
+// Soft gate: Limit needs min setup score; Market only needs conf bar
+setupOkLong  = trendBull and (not useLimit or smcScore >= minSetupScore)
+setupOkShort = trendBear and (not useLimit or smcScore >= minSetupScore)
+
+longSignal  = setupOkLong  and confidence >= confidenceRequired
+shortSignal = setupOkShort and confidence >= confidenceRequired
+
+// Anti-repaint: confirmed bars only (Python drops in-progress candle)
 newLong  = longSignal and not longSignal[1] and barstate.isconfirmed
 newShort = shortSignal and not shortSignal[1] and barstate.isconfirmed
 
@@ -206,15 +396,19 @@ newShort = shortSignal and not shortSignal[1] and barstate.isconfirmed
 //====================================================
 
 if showSignals and newLong
-    label.new(bar_index, low, "🟢 BUY\n" + str.tostring(confidence) + "%",
+    tag = useLimit ? "LIMIT " + longZone : "MARKET"
+    label.new(bar_index, low,
+         "🟢 BUY " + str.tostring(confidence) + "%\n" + tag + "\nsc " + str.tostring(smcScore),
          style = label.style_label_up, color = bullColor, textcolor = color.black, size = size.small)
 
 if showSignals and newShort
-    label.new(bar_index, high, "🔴 SELL\n" + str.tostring(confidence) + "%",
+    tag = useLimit ? "LIMIT " + shortZone : "MARKET"
+    label.new(bar_index, high,
+         "🔴 SELL " + str.tostring(confidence) + "%\n" + tag + "\nsc " + str.tostring(smcScore),
          style = label.style_label_down, color = bearColor, textcolor = color.white, size = size.small)
 
 //====================================================
-// PART 2 -- EXTERNAL BOS MARKERS
+// PART 2 -- BOS / SWEEP / FVG / CRT MARKERS
 //====================================================
 
 bosUp   = trendBull and not trendBull[1]
@@ -228,28 +422,26 @@ if showBOS and bosDown
     label.new(bar_index, high, "BOS ↓", style = label.style_label_down,
          color = color.new(bearColor, 70), textcolor = bearColor, size = size.tiny)
 
-//====================================================
-// PART 2 -- LIQUIDITY SWEEP MARKERS & FVG BOXES
-//====================================================
-
 plotshape(showLiquidity and bullSweep, title = "Bull Liquidity Sweep", style = shape.triangleup,
      location = location.belowbar, color = bullColor, size = size.tiny, text = "Sweep")
 
 plotshape(showLiquidity and bearSweep, title = "Bear Liquidity Sweep", style = shape.triangledown,
      location = location.abovebar, color = bearColor, size = size.tiny, text = "Sweep")
 
-if showFVG and bullFvg
+if showFVG and bullFvg and barstate.isconfirmed
     box.new(bar_index[2], high[2], bar_index, low, border_color = bullColor, bgcolor = color.new(bullColor, 85))
 
-if showFVG and bearFvg
+if showFVG and bearFvg and barstate.isconfirmed
     box.new(bar_index[2], low[2], bar_index, high, border_color = bearColor, bgcolor = color.new(bearColor, 85))
+
+plotshape(showCRT and bullCrt and barstate.isconfirmed, title = "Bull CRT", style = shape.diamond,
+     location = location.belowbar, color = color.aqua, size = size.tiny, text = "CRT")
+plotshape(showCRT and bearCrt and barstate.isconfirmed, title = "Bear CRT", style = shape.diamond,
+     location = location.abovebar, color = color.fuchsia, size = size.tiny, text = "CRT")
 
 //====================================================
 // PART 3 -- INTERNAL STRUCTURE & CHoCH
 //====================================================
-// CHoCH = the FIRST internal break AGAINST the prevailing internal bias.
-// Every subsequent break in the same direction is just continuation
-// (an internal BOS), not a CHoCH -- matching standard ICT/SMC definitions.
 
 var string internalBias = "NEUTRAL"
 
@@ -283,29 +475,29 @@ if showBOS and internalBosBear
          color = color.new(bearColor, 85), textcolor = bearColor, size = size.tiny)
 
 //====================================================
-// PART 3 -- ORDER BLOCKS
+// PART 3 -- ORDER BLOCKS (display; mid used in limit zone)
 //====================================================
-// The last down-close candle immediately before a bullish displacement
-// candle (and mirrored for bearish) -- the classic ICT order block
-// definition, anchored to your bot's own displacement flag.
 
-drawBullOB = obBullCandle and displacementFlag and close > open
-drawBearOB = obBearCandle and displacementFlag and close < open
+drawBullOB = foundLongOB and displacementFlag and close > open
+drawBearOB = foundShortOB and displacementFlag and close < open
+// Prefer classic opposing-candle box when present
+drawBullOBClassic = obBullCandle and displacementFlag and close > open
+drawBearOBClassic = obBearCandle and displacementFlag and close < open
 
-newBullOB = drawBullOB and not drawBullOB[1]
-newBearOB = drawBearOB and not drawBearOB[1]
+newBullOB = (drawBullOB or drawBullOBClassic) and not (drawBullOB[1] or drawBullOBClassic[1])
+newBearOB = (drawBearOB or drawBearOBClassic) and not (drawBearOB[1] or drawBearOBClassic[1])
 
 var array<box> bullOBBoxes = array.new_box(0)
 var array<box> bearOBBoxes = array.new_box(0)
 
-if showOB and newBullOB
+if showOB and newBullOB and barstate.isconfirmed
     newBox = box.new(bar_index - 1, obHigh, bar_index + obExtendBars, obLow,
          border_color = color.new(color.blue, 20), bgcolor = color.new(color.blue, 85))
     array.push(bullOBBoxes, newBox)
     if array.size(bullOBBoxes) > maxOBBoxes
         box.delete(array.shift(bullOBBoxes))
 
-if showOB and newBearOB
+if showOB and newBearOB and barstate.isconfirmed
     newBox = box.new(bar_index - 1, obHigh, bar_index + obExtendBars, obLow,
          border_color = color.new(color.purple, 20), bgcolor = color.new(color.purple, 85))
     array.push(bearOBBoxes, newBox)
@@ -330,11 +522,6 @@ fill(plotEqLine, plotLowLine, color = showPD ? color.new(color.green, 92) : na, 
 //====================================================
 // PART 3 -- EQUAL HIGHS / LOWS + LIQUIDITY HEATMAP
 //====================================================
-// Confirmed swing pivots are stored; any new pivot that lands within
-// tolerance of an older one is flagged as a liquidity pool (EQH/EQL).
-// The heatmap reuses that same pool data -- more historical touches
-// at a level = more opaque / thicker line, so it doubles as both
-// features without duplicating the detection logic.
 
 var array<float> pivotHighVals = array.new_float(0)
 var array<float> pivotLowVals  = array.new_float(0)
@@ -385,11 +572,8 @@ if not na(pl)
                      color = color.new(color.orange, heatTransL), width = math.min(touchCountL + 1, 4), extend = extend.right)
 
 //====================================================
-// PART 3 -- KILLZONES
+// PART 3 -- KILLZONES (UTC — matches strategy session bins)
 //====================================================
-// Same UTC hour bins as strategy.py's is_london_open / is_ny_open /
-// is_asian / is_overlap feature flags, so the dashboard session label
-// matches whatever your bot logged for that trade.
 
 utcHour = hour(time, "UTC")
 londonSession  = utcHour >= 7 and utcHour <= 11
@@ -406,62 +590,36 @@ bgcolor(showKillzones and overlapSession ? color.new(color.purple, 92) :
 sessionName = overlapSession ? "London/NY Overlap" : nySession ? "New York" : londonSession ? "London" : asianSession ? "Asian" : "Quiet"
 
 //====================================================
-// PART 3 -- ENTRY / SL / TP (mirrors strategy.py's pure-SMC dynamic SL/TP)
+// PART 3 -- ENTRY / SL / TP / INVALIDATION LINES
 //====================================================
-
-rrValue = smcScore >= 80 ? 2.0 : smcScore >= 60 ? 1.75 : 1.5
-slMult = 0.80
-
-longSL  = math.min(swingLow8 * 0.9995, close - entryATR * slMult)
-longTP  = close + (close - longSL) * rrValue
-shortSL = math.max(swingHigh8 * 1.0005, close + entryATR * slMult)
-shortTP = close - (shortSL - close) * rrValue
-
-// Retrace limit entry — mirrors strategy.py: rest at the FVG midpoint when a
-// gap exists, else an ATR-fraction pullback; clamped on the entry side of
-// price and >= 25% of the risk distance above/below the stop. TP is
-// re-derived from the limit entry so the drawn R:R matches the bot's actual
-// fill economics, not the chase-at-close ones.
-useLimit = entryMode == "Limit (retrace)"
-
-longLimitRaw  = bullFvg ? bullFvgMid : close - entryATR * retraceATR
-longLimit     = math.max(math.min(longLimitRaw, close), longSL + 0.25 * (close - longSL))
-shortLimitRaw = bearFvg ? bearFvgMid : close + entryATR * retraceATR
-shortLimit    = math.min(math.max(shortLimitRaw, close), shortSL - 0.25 * (shortSL - close))
-
-longEntryLvl  = useLimit ? longLimit : close
-longTPLvl     = useLimit ? longEntryLvl + (longEntryLvl - longSL) * rrValue : longTP
-shortEntryLvl = useLimit ? shortLimit : close
-shortTPLvl    = useLimit ? shortEntryLvl - (shortSL - shortEntryLvl) * rrValue : shortTP
 
 entryTagText = useLimit ? "LIMIT" : "ENTRY"
 
 if showLevels and newLong
-    line.new(bar_index, longEntryLvl, bar_index + 30, longEntryLvl, color = color.new(color.blue, 0), style = line.style_dashed)
+    line.new(bar_index, longEntry, bar_index + 30, longEntry, color = limitColor, style = line.style_dashed, width = 2)
     line.new(bar_index, longSL, bar_index + 30, longSL, color = bearColor, style = line.style_dashed)
-    line.new(bar_index, longTPLvl, bar_index + 30, longTPLvl, color = bullColor, style = line.style_dashed)
-    label.new(bar_index + 30, longTPLvl, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
+    line.new(bar_index, longTP, bar_index + 30, longTP, color = bullColor, style = line.style_dashed)
+    line.new(bar_index, longInv, bar_index + 30, longInv, color = invColor, style = line.style_dotted)
+    label.new(bar_index + 30, longTP, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
     label.new(bar_index + 30, longSL, "SL", style = label.style_label_left, color = color.new(bearColor, 80), textcolor = bearColor, size = size.tiny)
-    label.new(bar_index + 30, longEntryLvl, entryTagText, style = label.style_label_left, color = color.new(color.blue, 80), textcolor = color.new(color.blue, 0), size = size.tiny)
+    label.new(bar_index + 30, longEntry, entryTagText + " " + longZone, style = label.style_label_left, color = color.new(color.blue, 80), textcolor = limitColor, size = size.tiny)
+    label.new(bar_index + 30, longInv, "INV", style = label.style_label_left, color = color.new(color.orange, 80), textcolor = invColor, size = size.tiny)
 
 if showLevels and newShort
-    line.new(bar_index, shortEntryLvl, bar_index + 30, shortEntryLvl, color = color.new(color.blue, 0), style = line.style_dashed)
+    line.new(bar_index, shortEntry, bar_index + 30, shortEntry, color = limitColor, style = line.style_dashed, width = 2)
     line.new(bar_index, shortSL, bar_index + 30, shortSL, color = bearColor, style = line.style_dashed)
-    line.new(bar_index, shortTPLvl, bar_index + 30, shortTPLvl, color = bullColor, style = line.style_dashed)
-    label.new(bar_index + 30, shortTPLvl, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
+    line.new(bar_index, shortTP, bar_index + 30, shortTP, color = bullColor, style = line.style_dashed)
+    line.new(bar_index, shortInv, bar_index + 30, shortInv, color = invColor, style = line.style_dotted)
+    label.new(bar_index + 30, shortTP, "TP", style = label.style_label_left, color = color.new(bullColor, 80), textcolor = bullColor, size = size.tiny)
     label.new(bar_index + 30, shortSL, "SL", style = label.style_label_left, color = color.new(bearColor, 80), textcolor = bearColor, size = size.tiny)
-    label.new(bar_index + 30, shortEntryLvl, entryTagText, style = label.style_label_left, color = color.new(color.blue, 80), textcolor = color.new(color.blue, 0), size = size.tiny)
+    label.new(bar_index + 30, shortEntry, entryTagText + " " + shortZone, style = label.style_label_left, color = color.new(color.blue, 80), textcolor = limitColor, size = size.tiny)
+    label.new(bar_index + 30, shortInv, "INV", style = label.style_label_left, color = color.new(color.orange, 80), textcolor = invColor, size = size.tiny)
 
 //====================================================
 // PART 3 -- DASHBOARD
 //====================================================
 
-var table dash = table.new(position.top_right, 2, 12, border_width = 1, border_color = color.new(color.blue, 50))
-
-// Dashboard text color. Was white/gray, which is invisible on light chart
-// themes -- switched to a readable blue. Direction/severity is still conveyed
-// by the emojis and the AI bar fill, so no information is lost by dropping the
-// per-cell semantic colors.
+var table dash = table.new(position.top_right, 2, 14, border_width = 1, border_color = color.new(color.blue, 50))
 dashText = color.new(color.blue, 0)
 
 if barstate.islast and showDashboard
@@ -478,18 +636,18 @@ if barstate.islast and showDashboard
     table.cell(dash, 1, 2, regimeLabel, text_color = dashText, text_size = size.small)
 
     table.cell(dash, 0, 3, "Confidence", text_color = dashText, text_size = size.small)
-    table.cell(dash, 1, 3, str.tostring(confidence) + "%", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 3, str.tostring(confidence) + "% / " + str.tostring(confidenceRequired), text_color = dashText, text_size = size.small)
 
     barBlocks = math.round(confidence / 10)
     barStr = ""
     for i = 1 to 10
         barStr := barStr + (i <= barBlocks ? "█" : "░")
-    table.cell(dash, 0, 4, "AI Bar", text_color = dashText, text_size = size.small)
+    table.cell(dash, 0, 4, "Conf Bar", text_color = dashText, text_size = size.small)
     table.cell(dash, 1, 4, showAIBar ? barStr : "-", text_color = dashText, text_size = size.small)
 
-    volLabel = volSpike ? "Strong" : "Normal"
-    table.cell(dash, 0, 5, "Volume", text_color = dashText, text_size = size.small)
-    table.cell(dash, 1, 5, volLabel, text_color = dashText, text_size = size.small)
+    edges = (volSpike ? "V" : "-") + (displacementFlag ? "D" : "-") + ((bullSweep or bearSweep) ? "S" : "-") + ((bullFvg or bearFvg) ? "F" : "-") + ((bullCrt or bearCrt) ? "C" : "-")
+    table.cell(dash, 0, 5, "Edges", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 5, edges + "  zone=" + activeZone, text_color = dashText, text_size = size.small)
 
     atrLabel = entryATR > entryATRAvg * 1.3 ? "High" : entryATR < entryATRAvg * 0.7 ? "Low" : "Normal"
     table.cell(dash, 0, 6, "ATR", text_color = dashText, text_size = size.small)
@@ -502,27 +660,34 @@ if barstate.islast and showDashboard
     table.cell(dash, 1, 8, sessionName, text_color = dashText, text_size = size.small)
 
     table.cell(dash, 0, 9, "SMC Score", text_color = dashText, text_size = size.small)
-    table.cell(dash, 1, 9, str.tostring(smcScore) + " / 105", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 9, str.tostring(smcScore) + " / 110  (min " + str.tostring(minSetupScore) + " limit)", text_color = dashText, text_size = size.small)
 
     table.cell(dash, 0, 10, "Mode", text_color = dashText, text_size = size.small)
     table.cell(dash, 1, 10, tradeMode + "  " + f_tfLabel(trendTF) + " / " + f_tfLabel(entryTF), text_color = dashText, text_size = size.small)
 
     table.cell(dash, 0, 11, "Entry", text_color = dashText, text_size = size.small)
-    table.cell(dash, 1, 11, useLimit ? "📌 Limit (retrace)" : "⚡ Market (close)", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 11, useLimit ? "📌 Limit (OB/FVG/ATR)" : "⚡ Market (close)", text_color = dashText, text_size = size.small)
+
+    // Live levels for active bias
+    liveEntry = trendBull ? longEntry : trendBear ? shortEntry : na
+    liveSL    = trendBull ? longSL : trendBear ? shortSL : na
+    liveTP    = trendBull ? longTP : trendBear ? shortTP : na
+    table.cell(dash, 0, 12, "Levels", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 12,
+         na(liveEntry) ? "—" :
+         "E " + str.tostring(liveEntry, format.mintick) +
+         "  SL " + str.tostring(liveSL, format.mintick) +
+         "  TP " + str.tostring(liveTP, format.mintick),
+         text_color = dashText, text_size = size.tiny)
+
+    slRoom = (trendBull or trendBear) and not na(liveEntry) and not na(liveSL) and atrSafe > 0 ? math.abs(liveEntry - liveSL) / atrSafe : na
+    table.cell(dash, 0, 13, "SL room", text_color = dashText, text_size = size.small)
+    table.cell(dash, 1, 13, na(slRoom) ? "—" : str.tostring(slRoom, "#.##") + " ATR (min " + str.tostring(minSlAtr) + ")", text_color = dashText, text_size = size.small)
 
 //====================================================
 // PART 3 -- CHART TIMEFRAME GUARD
 //====================================================
-// The signal engine is pinned to entryTF/trendTF via request.security, so the
-// DASHBOARD is correct on ANY chart timeframe. But the per-bar markers
-// (BUY/SELL, FVG/OB boxes, SL/TP lines) are drawn on chart bars — and when the
-// chart TF is HIGHER than the entry TF, request.security only returns the
-// entry-TF value at each chart bar's close, so intrabar signals are missed and
-// boxes anchor to the wrong bars. Warn (don't silently mislead) in that case.
 
-// chartSecs is defined up top. In Auto mode entryTF == the chart TF, so this
-// guard never fires; it only warns for the fixed presets when the chart is
-// coarser than their entry TF.
 entrySecs = timeframe.in_seconds(entryTF)
 
 var label tfWarn = na
@@ -542,3 +707,7 @@ plotshape(volSpike, title = "Volume Spike", style = shape.circle, location = loc
 plotshape(displacementFlag, title = "Displacement", style = shape.triangleup, location = location.belowbar, color = color.aqua, size = size.tiny)
 plot(smcScore, "SMC Score", color = color.yellow, display = display.data_window)
 plot(confidence, "Confidence", color = color.fuchsia, display = display.data_window)
+plot(longEntry, "Long Limit/Entry", color = color.blue, display = display.data_window)
+plot(longSL, "Long SL", color = color.red, display = display.data_window)
+plot(shortEntry, "Short Limit/Entry", color = color.navy, display = display.data_window)
+plot(shortSL, "Short SL", color = color.maroon, display = display.data_window)
