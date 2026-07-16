@@ -98,15 +98,23 @@ def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str
     exit_fee = calculate_exit_fee(exit_price, qty)
     pnl_after_fees = pnl - exit_fee
 
-    # --- FIX #1: status was previously determined by matching exit_reason
-    # against the literal string "Take Profit Hit" -- a string that no
-    # longer exists anywhere in trade_monitor.py's current exit paths
-    # ("Stop Loss Hit", "Trailing Stop Hit", "Trailing Stop Failed - Forced
-    # Close", etc). Every trade fell through to the else branch and was
-    # labeled LOSS regardless of actual outcome. Deriving status from the
-    # real pnl sign is correct by construction and can't drift out of sync
-    # with whatever wording trade_monitor.py uses for exit_reason in future.
-    status = "WIN" if pnl_after_fees > 0 else "LOSS"
+    # Status from realized PnL sign (not exit_reason string matching).
+    # Trailing-stop exits are floored at fee-aware breakeven in the monitor,
+    # so an armed trail should never land here as a LOSS. Still: if the exit
+    # is on the favorable side of entry, treat tiny fee-rounding scratches
+    # on trail hits as WIN so cooldown/stats don't punish a worked setup.
+    if pnl_after_fees > 0:
+        status = "WIN"
+    elif (
+        exit_reason == "Trailing Stop Hit"
+        and (
+            (direction == "LONG" and exit_price >= entry)
+            or (direction == "SHORT" and exit_price <= entry)
+        )
+    ):
+        status = "WIN"
+    else:
+        status = "LOSS"
 
     # --- FIX #2: pnl/fees used to be set on the dict AFTER close_trade()
     # had already saved it to trade_history.json, so they never actually

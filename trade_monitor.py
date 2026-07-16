@@ -88,6 +88,42 @@ async def _close_trade_record(trade, exit_price, exit_reason):
     # 10-minute schedule in main.py, decoupled from the monitor hot path.
 
 
+def _fee_aware_breakeven(direction, entry, fee_rate):
+    """Minimum favorable exit so net PnL after a single-side fee is still >= 0.
+
+    Paper close math is (exit - entry)*qty - exit*fee for LONG (and the
+    symmetric form for SHORT). Solving for exit gives a tiny buffer above
+    (LONG) / below (SHORT) entry — enough that a trail fill never flips to
+    LOSS purely from fee rounding after the trade already reached the arm zone.
+    """
+    entry = float(entry)
+    fee_rate = float(fee_rate)
+    if fee_rate <= 0 or fee_rate >= 1:
+        return entry
+    if direction == "LONG":
+        return entry / (1.0 - fee_rate)
+    return entry / (1.0 + fee_rate)
+
+
+def trail_stop_price(direction, anchor, trail_percent, entry, fee_rate=0.0):
+    """Ratcheting trail stop, floored/ceiled at fee-aware breakeven.
+
+    Once trailing is armed the trade has already travelled ~TRAIL_ACTIVATION_RATIO
+    of the way to TP. A pure percent trail can sit *below* entry on tight stops
+    (trail distance > locked-in progress), so a trail hit was recorded as a LOSS
+    even though the setup worked and we only gave back open profit. Flooring at
+    breakeven locks the winner: trail hits are scratches/small wins, never losses.
+    """
+    trail = float(trail_percent)
+    anchor = float(anchor)
+    be = _fee_aware_breakeven(direction, entry, fee_rate)
+    if direction == "LONG":
+        raw = anchor * (1.0 - trail / 100.0)
+        return max(raw, be)
+    raw = anchor * (1.0 + trail / 100.0)
+    return min(raw, be)
+
+
 async def _handle_paper_trailing(trade, symbol, direction, current_price, open_trades):
     """Simulate a ratcheting trailing stop for paper trades.
 
@@ -97,17 +133,22 @@ async def _handle_paper_trailing(trade, symbol, direction, current_price, open_t
     with the ugly reason 'Trailing Stop Failed - Forced Close'. Now the trail
     anchor ratchets with favorable price and the trade closes when price
     retraces TRAIL_PERCENT from the best level — the same behavior the live
-    Bybit trailing stop provides. Returns True if the trade was closed."""
+    Bybit trailing stop provides. Trail stop is floored at fee-aware breakeven
+    so an armed trail can never mark the trade as a LOSS. Returns True if the
+    trade was closed."""
+    from paper_trader import FEE_RATE
+
     trail = float(trade.get("trail_percent", TRAIL_PERCENT))
     anchor = float(trade.get("trail_anchor", current_price))
+    entry = float(trade.get("entry", 0) or 0)
 
     if direction == "LONG":
         anchor = max(anchor, current_price)
-        stop_price = anchor * (1 - trail / 100)
+        stop_price = trail_stop_price("LONG", anchor, trail, entry, FEE_RATE)
         breached = current_price <= stop_price
     else:
         anchor = min(anchor, current_price)
-        stop_price = anchor * (1 + trail / 100)
+        stop_price = trail_stop_price("SHORT", anchor, trail, entry, FEE_RATE)
         breached = current_price >= stop_price
 
     if breached:

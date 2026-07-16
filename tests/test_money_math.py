@@ -91,3 +91,7 @@ def test_close_pnl_status_derived_from_pnl_not_exit_reason(monkeypatch):
     close_paper_trade_with_fees(trade, exit_price=110.0, exit_reason="Some Novel Reason")
     assert captured["status"] == "WIN"
     assert captured["extra"]["pnl"] is not None
+
+    # Real stop-out still LOSS
+    close_paper_trade_with_fees(trade, exit_price=98.0, exit_reason="Stop Loss Hit")
+    assert captured["status"] == "LOSS"
