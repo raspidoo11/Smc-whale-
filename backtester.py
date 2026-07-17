@@ -106,19 +106,23 @@ def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, act
                     trailing, anchor = True, l
 
         if trailing:
-            # Floor/ceiling at entry once trailing is armed: a pure percent trail
-            # can sit past breakeven on tight stops (trail distance > locked-in
-            # progress to TP), which used to mark trail hits as LOSSes even
-            # though the trade reached the arm zone. Match paper_trader /
-            # trade_monitor.trail_stop_price (fee buffer applied on close).
+            # Match trade_monitor.trail_stop_price: cap trail distance at half
+            # of open profit so tight scalps don't pin every exit to entry
+            # (paper balance was getting $0 on "WIN" trail hits).
             if direction == "LONG":
                 anchor = max(anchor, h)
-                stop = max(anchor * (1 - trail_pct / 100), entry)
+                pct_dist = abs(anchor) * trail_pct / 100.0
+                open_profit = abs(anchor - entry)
+                dist = min(pct_dist, open_profit * 0.5) if open_profit > 0 else pct_dist
+                stop = max(anchor - dist, entry)
                 if l <= stop:
                     return stop, "Trailing Stop Hit", k + 1
             else:
                 anchor = min(anchor, l)
-                stop = min(anchor * (1 + trail_pct / 100), entry)
+                pct_dist = abs(anchor) * trail_pct / 100.0
+                open_profit = abs(entry - anchor)
+                dist = min(pct_dist, open_profit * 0.5) if open_profit > 0 else pct_dist
+                stop = min(anchor + dist, entry)
                 if h >= stop:
                     return stop, "Trailing Stop Hit", k + 1
 

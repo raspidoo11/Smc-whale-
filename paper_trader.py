@@ -75,6 +75,7 @@ def open_paper_trade(signal: dict):
         "confidence": signal.get("confidence"),
         "ai_prob": signal.get("ai_prob"),
         "entry_fee": entry_fee,
+        "entry_fee_applied": True,  # prepaid — close must not charge again
     }
 
     add_trade(trade)
@@ -86,9 +87,21 @@ def open_paper_trade(signal: dict):
 
 
 def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str):
+    """Close a paper (or local-mirror) trade and credit paper balance.
+
+    Balance is updated *inside* close_trade via balance_delta so history and
+    cash cannot diverge (the trailing-stop bug: WIN rows with a frozen
+    balance happened when close succeeded but a separate update_balance
+    never ran, or ran against a trade already removed from the open list).
+    """
     entry = float(trade["entry"])
     qty = float(trade["qty"])
-    direction = trade["direction"]
+    direction = str(trade.get("direction", "LONG")).upper()
+    exit_price = float(exit_price)
+
+    if qty <= 0:
+        logger.error(f"❌ {trade.get('symbol')}: qty={qty} — cannot close with zero size")
+        return None
 
     if direction == "LONG":
         pnl = (exit_price - entry) * qty
@@ -96,7 +109,19 @@ def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str
         pnl = (entry - exit_price) * qty
 
     exit_fee = calculate_exit_fee(exit_price, qty)
-    pnl_after_fees = pnl - exit_fee
+
+    # Entry fee: open_paper_trade deducts it up front; main.py's paper path
+    # does not. Charge it on close when it was never applied so trail/SL/TP
+    # wins still move the paper balance by the true net, not gross-minus-exit.
+    entry_fee = float(trade.get("entry_fee") or 0)
+    entry_fee_prepaid = bool(trade.get("entry_fee_applied"))
+    if entry_fee <= 0 and not entry_fee_prepaid:
+        entry_fee = calculate_entry_fee(entry, qty)
+    if entry_fee_prepaid:
+        # Already removed from balance at open — only subtract exit fee here.
+        pnl_after_fees = pnl - exit_fee
+    else:
+        pnl_after_fees = pnl - exit_fee - entry_fee
 
     # Status from realized PnL sign (not exit_reason string matching).
     # Trailing-stop exits are floored at fee-aware breakeven in the monitor,
@@ -116,38 +141,33 @@ def close_paper_trade_with_fees(trade: dict, exit_price: float, exit_reason: str
     else:
         status = "LOSS"
 
-    # --- FIX #2: pnl/fees used to be set on the dict AFTER close_trade()
-    # had already saved it to trade_history.json, so they never actually
-    # persisted (pnl stayed None forever). Passing them as extra_fields
-    # means they're merged onto the trade before it's written.
+    # Persist pnl/fees AND apply balance_delta in one close_trade call.
     closed_trade = close_trade(
         trade["symbol"],
         exit_price,
         status,
         extra_fields={
-            "pnl": round(pnl_after_fees, 2),
-            "entry_fee": trade.get("entry_fee", 0),
+            "pnl": round(pnl_after_fees, 4),
+            "entry_fee": entry_fee,
             "exit_fee": exit_fee,
             "exit_reason": exit_reason,
         },
+        balance_delta=pnl_after_fees,
+        trade_no=trade.get("trade_no"),
     )
 
-    # --- FIX #3: only touch the balance if this call actually closed the
-    # trade. close_trade() returns None when the trade was already closed by
-    # another path (e.g. reconcile got there first) — updating the balance
-    # anyway double-counted the PnL and fired a second close alert.
+    # close_trade() returns None when the trade was already closed by another
+    # path (e.g. reconcile) — balance was not touched again (no double count).
     if closed_trade is None:
         logger.warning(
             f"↩️ {trade['symbol']}: already closed elsewhere — skipping balance/alert"
         )
         return None
 
-    update_balance(pnl_after_fees)
-
     logger.info(
         f"✅ CLOSED {trade['symbol']} | {exit_reason} | {status} | "
-        f"Raw PnL: ${pnl:.2f} | Exit Fee: ${exit_fee:.2f} | "
-        f"Net PnL: ${pnl_after_fees:.2f}"
+        f"Raw PnL: ${pnl:.4f} | Fees: ${entry_fee + exit_fee:.4f} | "
+        f"Net PnL: ${pnl_after_fees:.4f}"
     )
 
     return pnl_after_fees

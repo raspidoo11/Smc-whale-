@@ -429,6 +429,11 @@ def main():
     asyncio.run(startup())
     maybe_import_pretrained()
     maybe_backfill_on_start()
+    # Snap local balance/positions to Bybit BEFORE the first scan. Otherwise
+    # live risk sizing and portfolio heat still see START_BALANCE (often $100)
+    # while the wallet already has real equity — qty rounds to 0 on majors and
+    # every Bybit order is skipped until the first 2-minute reconcile.
+    run_reconcile_sync()
     run_scan_sync(force=True)
     run_monitor_sync()
     retrain_model()

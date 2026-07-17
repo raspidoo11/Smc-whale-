@@ -78,12 +78,12 @@ def test_close_pnl_status_derived_from_pnl_not_exit_reason(monkeypatch):
     strings — the old string-match labeled every trade LOSS."""
     captured = {}
 
-    def fake_close_trade(symbol, exit_price, status, extra_fields=None):
+    def fake_close_trade(symbol, exit_price, status, extra_fields=None, balance_delta=None, trade_no=None):
         captured["status"] = status
         captured["extra"] = extra_fields
+        captured["balance_delta"] = balance_delta
         return {"symbol": symbol, "status": status, **(extra_fields or {})}
 
-    monkeypatch.setattr(paper_trader, "update_balance", lambda pnl: None)
     monkeypatch.setattr(paper_trader, "close_trade", fake_close_trade)
 
     trade = {"symbol": "BTCUSDT", "entry": 100.0, "qty": 1.0, "direction": "LONG"}
@@ -91,6 +91,7 @@ def test_close_pnl_status_derived_from_pnl_not_exit_reason(monkeypatch):
     close_paper_trade_with_fees(trade, exit_price=110.0, exit_reason="Some Novel Reason")
     assert captured["status"] == "WIN"
     assert captured["extra"]["pnl"] is not None
+    assert captured["balance_delta"] is not None
 
     # Real stop-out still LOSS
     close_paper_trade_with_fees(trade, exit_price=98.0, exit_reason="Stop Loss Hit")

@@ -34,26 +34,39 @@ def test_round_price_no_market_falls_back():
     assert round_price(1.23456789, None) == round(1.23456789, 6)
 
 
-def test_trail_stop_floors_at_breakeven_long():
-    # Tight stop: pure 0.3% trail from activation sits *below* entry.
-    # Floor must lift it to fee-aware BE so a trail hit cannot be a loss.
+def test_trail_stop_locks_partial_profit_on_tight_scalp_long():
+    # Pure 0.3% trail from a tight arm sits *below* entry. We cap trail
+    # distance at half of open profit so the stop stays above entry and
+    # paper balance actually receives a non-zero credit on trail hits.
     entry = 100.0
     anchor = 100.27  # ~90% of way to a 0.3% TP
-    raw = anchor * (1 - 0.3 / 100)
-    assert raw < entry
+    raw_pct = anchor * (1 - 0.3 / 100)
+    assert raw_pct < entry
     stop = trail_stop_price("LONG", anchor, 0.3, entry, FEE_RATE)
-    assert stop >= entry
-    assert stop == entry / (1.0 - FEE_RATE)
+    be = entry / (1.0 - FEE_RATE)
+    assert stop >= be
+    assert stop > entry
+    # Half of 0.27 open profit → stop at 100.135
+    assert abs(stop - (anchor - 0.27 * 0.5)) < 1e-9
 
 
-def test_trail_stop_ceilings_at_breakeven_short():
+def test_trail_stop_ceilings_partial_profit_on_tight_scalp_short():
     entry = 100.0
     anchor = 99.73
-    raw = anchor * (1 + 0.3 / 100)
-    assert raw > entry
+    raw_pct = anchor * (1 + 0.3 / 100)
+    assert raw_pct > entry
     stop = trail_stop_price("SHORT", anchor, 0.3, entry, FEE_RATE)
-    assert stop <= entry
-    assert stop == entry / (1.0 + FEE_RATE)
+    be = entry / (1.0 + FEE_RATE)
+    assert stop <= be
+    assert stop < entry
+    assert abs(stop - (anchor + 0.27 * 0.5)) < 1e-9
+
+
+def test_trail_stop_never_below_breakeven_when_no_open_profit():
+    # Anchor == entry → no open profit to lock; BE floor still applies.
+    entry = 100.0
+    stop = trail_stop_price("LONG", entry, 0.3, entry, FEE_RATE)
+    assert stop == entry / (1.0 - FEE_RATE)
 
 
 def test_trail_stop_does_not_raise_when_locked_profit_exceeds_trail():
@@ -76,18 +89,18 @@ def test_backtester_trail_hit_never_exits_below_entry_long():
 
 
 def test_paper_trail_hit_records_win_not_loss(monkeypatch):
-    """Armed trail on a tight setup retraces through the raw trail level
-    (below entry) — fill is floored at BE and status is WIN."""
+    """Armed trail on a tight setup retraces through the stop — fill stays
+    above entry (profit lock + BE floor) and status is WIN with balance_delta."""
     captured = {}
 
-    def fake_close(symbol, exit_price, status, extra_fields=None):
+    def fake_close(symbol, exit_price, status, extra_fields=None, balance_delta=None, trade_no=None):
         captured["status"] = status
         captured["exit_price"] = exit_price
         captured["extra"] = extra_fields
+        captured["balance_delta"] = balance_delta
         return {"symbol": symbol, "status": status, **(extra_fields or {})}
 
     monkeypatch.setattr("paper_trader.close_trade", fake_close)
-    monkeypatch.setattr("paper_trader.update_balance", lambda pnl: None)
 
     trade = {
         "symbol": "SOL/USDT:USDT",
@@ -97,14 +110,15 @@ def test_paper_trail_hit_records_win_not_loss(monkeypatch):
         "tp": 100.3,
         "qty": 5.0,
         "entry_fee": 0.02,
+        "entry_fee_applied": True,  # already deducted at open
         "trail_percent": 0.3,
         "trail_anchor": 100.27,
         "trailing_stop_active": True,
         "status": "OPEN",
+        "trade_no": 7,
     }
     open_trades = [trade]
-    # Price well below the raw trail (and below entry) — would have been a LOSS
-    # before the BE floor.
+    # Price well below the stop — would have been a LOSS before the floor.
     closed = asyncio.run(
         _handle_paper_trailing(trade, trade["symbol"], "LONG", 99.50, open_trades)
     )
@@ -112,6 +126,8 @@ def test_paper_trail_hit_records_win_not_loss(monkeypatch):
     assert open_trades == []
     assert captured["status"] == "WIN"
     assert captured["exit_price"] >= 100.0
+    assert captured["balance_delta"] is not None
+    assert captured["balance_delta"] > 0  # profit lock => real paper credit
     assert (captured["extra"] or {}).get("exit_reason") == "Trailing Stop Hit"
 
 
@@ -119,12 +135,12 @@ def test_close_trail_scratch_at_entry_is_win(monkeypatch):
     """Even if fees nibble a hair past zero, favorable-side trail exit = WIN."""
     captured = {}
 
-    def fake_close(symbol, exit_price, status, extra_fields=None):
+    def fake_close(symbol, exit_price, status, extra_fields=None, balance_delta=None, trade_no=None):
         captured["status"] = status
+        captured["balance_delta"] = balance_delta
         return {"symbol": symbol, "status": status, **(extra_fields or {})}
 
     monkeypatch.setattr("paper_trader.close_trade", fake_close)
-    monkeypatch.setattr("paper_trader.update_balance", lambda pnl: None)
 
     trade = {
         "symbol": "BTC/USDT:USDT",
@@ -132,8 +148,10 @@ def test_close_trail_scratch_at_entry_is_win(monkeypatch):
         "entry": 100.0,
         "qty": 1.0,
         "entry_fee": 0.04,
+        "entry_fee_applied": True,
     }
     # Exit exactly at entry: raw pnl 0, exit fee > 0 -> pnl_after_fees < 0,
     # but trail + favorable side must still count as WIN.
     close_paper_trade_with_fees(trade, 100.0, "Trailing Stop Hit")
     assert captured["status"] == "WIN"
+    assert captured["balance_delta"] is not None
