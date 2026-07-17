@@ -1,5 +1,5 @@
 """Scalp pacing: the time stop (MAX_HOLD_MINUTES) and the stop-distance cap
-(SL_MAX_ATR_MULT). Both default OFF — these tests exercise the enabled paths."""
+(SL_MAX_ATR_MULT). Defaults are ON for scalp mode; tests still pin values."""
 
 import sys
 import types

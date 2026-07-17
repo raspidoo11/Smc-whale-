@@ -23,6 +23,7 @@ from trade_manager import (
     get_balance,
     save_balance,
     add_daily_pnl,
+    claim_close_alert,
 )
 from bybit_executor import (
     EXECUTE_TRADES,
@@ -96,6 +97,7 @@ async def reconcile_positions():
                 "exit_reason": "Closed on exchange (SL/TP)"
                                + (" · approx PnL" if approx else ""),
             },
+            trade_no=trade.get("trade_no"),
         )
 
         if closed is None:
@@ -105,6 +107,10 @@ async def reconcile_positions():
         # but the daily circuit breaker must still see this loss/win — without
         # this, every exchange-side close was invisible to DAILY_LOSS_LIMIT.
         add_daily_pnl(realized)
+
+        # Same de-dupe as the monitor: never double-Telegram a close.
+        if not claim_close_alert(trade):
+            continue
 
         balance = get_balance().get("balance", 0)
         try:

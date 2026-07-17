@@ -35,7 +35,8 @@ RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.05))
 # daily_pnl drops below -DAILY_LOSS_LIMIT.
 DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", 15))
 
-MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", 10))
+# Scalp default: fewer concurrent slots so capital recycles fast.
+MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", 8))
 MAX_SIGNALS = int(os.getenv("MAX_SIGNALS", 3))
 
 # ==========================================================
@@ -67,47 +68,35 @@ AI_MAX_WEIGHT = float(os.getenv("AI_MAX_WEIGHT", 0.40))
 AI_WEIGHT_FULL_AT = int(os.getenv("AI_WEIGHT_FULL_AT", 150))
 
 # ==========================================================
-# Trailing stop — let winners run instead of capping at TP
+# Trailing stop (optional — OFF for pure scalps by default)
 # ==========================================================
-# When price gets this far along the entry->TP path, cancel the hard take-profit
-# and hand the position to a trailing stop. 0.90 = activate at 90% of the way.
-# Defaults set from optimize.py runs (2026-07-05, BTC/ETH/SOL, 10d of 5m data,
-# maker/taker fees + slippage): trail 0.3 / activation 0.90 ranked best across
-# both entry modes and both fee models tested. Re-run optimize.py periodically —
-# these are regime-dependent.
-TRAIL_ACTIVATION_RATIO = float(os.getenv("TRAIL_ACTIVATION_RATIO", 0.90))
-# Trailing distance as a percent of price (0.3 = trail 0.3% behind the peak).
-TRAIL_PERCENT = float(os.getenv("TRAIL_PERCENT", 0.3))
+# Progress along entry→TP at which we cancel hard TP and trail.
+# Default 1.05 = never arm trail in normal range (hard TP is the scalp exit).
+# Set e.g. 0.90 if you want runners after partial TP progress.
+TRAIL_ACTIVATION_RATIO = float(os.getenv("TRAIL_ACTIVATION_RATIO", 1.05))
+# Trailing distance as a percent of price (only used if trail arms).
+TRAIL_PERCENT = float(os.getenv("TRAIL_PERCENT", 0.2))
 
 # ==========================================================
-# Scalp pacing — force trades to resolve fast (both OFF by default so the
-# current experiment isn't silently altered; enable via env)
+# Scalp pacing — tight holds, tight stops (ON by default)
 # ==========================================================
-# Close any OPEN trade at market once held this many minutes without
-# resolving (0 = disabled). A scalp thesis that hasn't played out within a
-# couple of hours is dead capital tying up a slot. Trades already running on
-# a trailing stop are exempt — never evict a winner.
-MAX_HOLD_MINUTES = float(os.getenv("MAX_HOLD_MINUTES", 0))
-# Cap the stop distance at this many ATRs (0 = disabled). The structural
-# stop stays the default, but this bounds how FAR it may sit — smaller stops
-# mean faster resolution and smaller absolute risk, at the cost of more
-# stop-outs and fees eating a larger fraction of each R. Keep this ABOVE
-# MIN_SL_ATR or the cap will override the anti-stop-hunt floor.
-SL_MAX_ATR_MULT = float(os.getenv("SL_MAX_ATR_MULT", 0))
+# Market-close any OPEN trade still unresolved after this many minutes
+# (0 = disabled). Trailing winners are exempt.
+MAX_HOLD_MINUTES = float(os.getenv("MAX_HOLD_MINUTES", 45))
+# Cap stop distance at this many ATRs (0 = disabled). Keeps SL/TP on scalp
+# scale even when HTF structure is wide. Keep >= MIN_SL_ATR.
+SL_MAX_ATR_MULT = float(os.getenv("SL_MAX_ATR_MULT", 1.2))
 
 # ==========================================================
 # Entry execution — prediction limits vs chase-at-market
 # ==========================================================
-# "limit"  : rest a GTC limit at a predicted institutional zone (order block,
-#            FVG mid, or ATR pullback) and WAIT for price to come to us — desk
-#            behaviour, not chase-the-close.
-# "market" : legacy behavior — enter at the signal candle's close immediately.
-ENTRY_MODE = os.getenv("ENTRY_MODE", "limit").lower()
-# Fallback retrace depth when no FVG/OB exists: limit = close -/+ fraction*ATR.
-RETRACE_ATR_FRACTION = float(os.getenv("RETRACE_ATR_FRACTION", 0.45))
-# How long an unfilled prediction may rest. 30m was cancelling good limits
-# before the pullback arrived; desks wait for the level (default 3h).
-LIMIT_TTL_MINUTES = float(os.getenv("LIMIT_TTL_MINUTES", 180))
+# Scalp default: market = enter at signal close immediately.
+# "limit" rests a GTC at OB/FVG/ATR pullback and waits (slower).
+ENTRY_MODE = os.getenv("ENTRY_MODE", "market").lower()
+# Fallback retrace depth when no FVG/OB exists (limit mode only).
+RETRACE_ATR_FRACTION = float(os.getenv("RETRACE_ATR_FRACTION", 0.25))
+# How long an unfilled prediction may rest (limit mode).
+LIMIT_TTL_MINUTES = float(os.getenv("LIMIT_TTL_MINUTES", 30))
 # Cancel a resting limit if price trades through the invalidation level
 # (structure broken) before fill — avoids filling into a failed setup.
 INVALIDATE_PENDING_ON_STRUCTURE = (
@@ -115,20 +104,19 @@ INVALIDATE_PENDING_ON_STRUCTURE = (
 )
 
 # ==========================================================
-# Stop placement (anti stop-hunt)
+# Stop placement (scalp-tight)
 # ==========================================================
-# Old logic took a tight ATR multiple (0.7–1.0×) or a swing * 0.9995 — both
-# sit inside the noise that sweeps equal highs/lows. New policy:
-#   SL = beyond structural swing + buffer, AND at least MIN_SL_ATR from entry.
-# That is the *wider* of the two constraints (more room), never the tighter.
-# Swing is taken as the *wider* of entry TF (5m) and bias TF (15m) so the
-# stop is not parked under micro equal-lows that look like bait on 15m.
-MIN_SL_ATR = float(os.getenv("MIN_SL_ATR", 1.15))
-# Extra room past the swing so a wick through equal lows/highs doesn't tag SL.
-STRUCTURE_SL_BUFFER_ATR = float(os.getenv("STRUCTURE_SL_BUFFER_ATR", 0.25))
-# Structural swing lookback in bars on *each* TF used for the stop
-# (20 × 5m ≈ 100m; 20 × 15m ≈ 5h of bias structure).
-STRUCTURE_SWING_LOOKBACK = int(os.getenv("STRUCTURE_SWING_LOOKBACK", 20))
+# SL = beyond structure + buffer, and at least MIN_SL_ATR from entry, then
+# capped by SL_MAX_ATR_MULT so geometry stays scalp-sized.
+MIN_SL_ATR = float(os.getenv("MIN_SL_ATR", 0.8))
+# Extra room past the swing (×ATR).
+STRUCTURE_SL_BUFFER_ATR = float(os.getenv("STRUCTURE_SL_BUFFER_ATR", 0.15))
+# Structural swing lookback in bars per TF (10 × 5m ≈ 50m of structure).
+STRUCTURE_SWING_LOOKBACK = int(os.getenv("STRUCTURE_SWING_LOOKBACK", 10))
+
+# Take-profit R-multiples (scalp: take money fast, not 2.5R swings).
+RR_MIN = float(os.getenv("RR_MIN", 1.0))
+RR_MAX = float(os.getenv("RR_MAX", 1.5))
 
 # ==========================================================
 # Entry quality gates

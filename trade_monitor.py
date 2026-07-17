@@ -1,7 +1,12 @@
 import logging
 import asyncio
 from datetime import datetime, timezone
-from trade_manager import get_open_trades, save_open_trades, get_balance
+from trade_manager import (
+    get_open_trades,
+    save_open_trades,
+    get_balance,
+    claim_close_alert,
+)
 from exchange import get_exchange
 from bybit_executor import (
     EXECUTE_TRADES,
@@ -98,8 +103,13 @@ async def _close_trade_record(trade, exit_price, exit_reason):
     if pnl_after_fees is None:
         return None
 
-    balance = get_balance()["balance"]
-    await send_alert(format_close_alert(trade, exit_price, exit_reason, pnl_after_fees, balance))
+    # claim_close_alert: even if two paths both manage to close (or one
+    # resurrects the row briefly), Telegram only fires once per trade_no.
+    if claim_close_alert(trade):
+        balance = get_balance()["balance"]
+        await send_alert(
+            format_close_alert(trade, exit_price, exit_reason, pnl_after_fees, balance)
+        )
     # Retraining is intentionally NOT triggered here — it runs on its own
     # 10-minute schedule in main.py, decoupled from the monitor hot path.
     return pnl_after_fees
@@ -433,6 +443,20 @@ async def monitor_trades():
 
                 if hit_sl:
                     exit_price = sl
+                    # Live/demo: Bybit owns the protective SL attached at entry.
+                    # Closing the local record while size is still open orphans a
+                    # real position (ticker can touch SL before mark-price SL
+                    # fills — common on tight scalps). Wait until flat, then
+                    # record; reconcile is the backup if price recovers first.
+                    if EXECUTE_TRADES:
+                        live_size = get_open_position_size(symbol)
+                        if live_size is None:
+                            continue
+                        if live_size > 0:
+                            continue
+                        closed_info = get_last_closed_pnl(symbol) or {}
+                        if closed_info.get("exit_price"):
+                            exit_price = closed_info["exit_price"]
                     logger.info(f"🚨 Stop Loss Hit on {symbol} at ${exit_price:.6f}")
                     pnl = await _close_trade_record(trade, exit_price, "Stop Loss Hit")
                     if pnl is not None and trade in open_trades:
@@ -442,7 +466,31 @@ async def monitor_trades():
                         trades_changed = True
                     continue
 
-                if near_tp:
+                # Hard TP (scalp default): TRAIL_ACTIVATION_RATIO >= 1.0 means
+                # we do NOT arm a trail — take the fixed TP and free the slot.
+                progress = tp_progress(direction, entry, tp, current_price)
+                hit_tp = progress >= 1.0
+                if hit_tp and TRAIL_ACTIVATION_RATIO >= 1.0:
+                    exit_price = tp
+                    if EXECUTE_TRADES:
+                        live_size = get_open_position_size(symbol)
+                        if live_size is None:
+                            continue
+                        if live_size > 0:
+                            continue  # wait for exchange TP fill
+                        closed_info = get_last_closed_pnl(symbol) or {}
+                        if closed_info.get("exit_price"):
+                            exit_price = closed_info["exit_price"]
+                    logger.info(f"🎯 Take Profit Hit on {symbol} at ${exit_price:.6f}")
+                    pnl = await _close_trade_record(trade, exit_price, "Take Profit Hit")
+                    if pnl is not None and trade in open_trades:
+                        open_trades.remove(trade)
+                        trades_changed = True
+                    elif pnl is not None:
+                        trades_changed = True
+                    continue
+
+                if near_tp and TRAIL_ACTIVATION_RATIO < 1.0:
                     # ---- Paper: arm the simulated trailing stop ----
                     if not EXECUTE_TRADES:
                         trade["trailing_stop_active"] = True
@@ -465,6 +513,10 @@ async def monitor_trades():
                         logger.warning(
                             f"{symbol}: trailing stop failed {attempts}x, forcing close at market"
                         )
+                        # MUST hit the exchange — a local-only close leaves a
+                        # live position running with no bot management.
+                        if not await close_position_market(symbol, direction, qty):
+                            continue
                         pnl = await _close_trade_record(
                             trade, current_price, "Trailing Stop Failed - Forced Close"
                         )
@@ -501,7 +553,22 @@ async def monitor_trades():
                 logger.exception(f"❌ Error monitoring trade {trade.get('symbol')}: {e}")
 
         if trades_changed:
-            save_open_trades(open_trades)
+            # Persist only trades still open on disk identity. close_trade()
+            # already wrote the open list without closed rows; a naive save of
+            # a stale in-memory list can resurrect a closed trade and fire a
+            # second close alert on the next cycle.
+            still_open_keys = {
+                (t.get("trade_no"), t.get("symbol"))
+                for t in get_open_trades()
+                if t.get("status") in ("OPEN", "PENDING")
+            }
+            to_save = [
+                t for t in open_trades
+                if (t.get("trade_no"), t.get("symbol")) in still_open_keys
+                or t.get("status") == "PENDING"
+            ]
+            # Prefer memory copies for still-open rows (trail_anchor etc.).
+            save_open_trades(to_save)
 
     except Exception as e:
         logger.exception(f"❌ Monitor trades failed: {e}")

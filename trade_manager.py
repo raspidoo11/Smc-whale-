@@ -1,6 +1,7 @@
 import json
 import os
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 
 from config import DATA_DIR, DAILY_LOSS_LIMIT
@@ -17,6 +18,37 @@ COOLDOWN_FILE = os.path.join(DATA_DIR, "cooldowns.json")
 # concurrency + queryable history and auto-migrates existing JSON on first run.
 # The JSON backend is kept as a fallback / for tests.
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "sqlite").lower()
+
+# In-process de-dupe: monitor + reconcile can both notice the same exchange
+# close within seconds. Only the first successful close alert is sent.
+_CLOSE_ALERT_SENT = {}  # key -> monotonic timestamp
+_CLOSE_ALERT_TTL_SEC = 3600
+
+
+def _close_alert_key(trade=None, symbol=None, trade_no=None):
+    if trade is not None:
+        trade_no = trade.get("trade_no") if trade_no is None else trade_no
+        symbol = trade.get("symbol") if symbol is None else symbol
+    if trade_no is not None and trade_no != "":
+        return f"no:{trade_no}"
+    return f"sym:{symbol or '?'}"
+
+
+def claim_close_alert(trade=None, symbol=None, trade_no=None):
+    """Return True only once per closed trade (suppresses duplicate Telegram
+    close alerts from monitor vs reconcile vs a resurrected open row)."""
+    now = time.monotonic()
+    # Drop expired keys so the set cannot grow forever.
+    expired = [k for k, ts in _CLOSE_ALERT_SENT.items() if now - ts > _CLOSE_ALERT_TTL_SEC]
+    for k in expired:
+        _CLOSE_ALERT_SENT.pop(k, None)
+
+    key = _close_alert_key(trade=trade, symbol=symbol, trade_no=trade_no)
+    if key in _CLOSE_ALERT_SENT:
+        logger.info(f"🔕 Suppressing duplicate close alert for {key}")
+        return False
+    _CLOSE_ALERT_SENT[key] = now
+    return True
 
 # ==================== JSON HELPERS ====================
 

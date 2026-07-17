@@ -26,6 +26,8 @@ from config import (
     STRUCTURE_SWING_LOOKBACK,
     SL_MAX_ATR_MULT,
     ENTRY_MODE,
+    RR_MIN,
+    RR_MAX,
 )
 
 
@@ -633,26 +635,27 @@ def get_signal(symbol, df_15m, df_5m):
         if pd.isna(atr_average):
             atr_average = atr
 
+        # Scalp RR: clamp to [RR_MIN, RR_MAX] (defaults 1.0–1.5). Old 2–2.5R
+        # targets turned every "scalp" into a multi-hour swing.
+        lo, hi = float(RR_MIN), float(RR_MAX)
+        if hi < lo:
+            lo, hi = hi, lo
+        mid = (lo + hi) / 2.0
+
         if USE_XGBOOST:
-
             if atr > atr_average * 1.30:
-                rr = 2.50
-
+                rr = hi
             elif atr < atr_average * 0.70:
-                rr = 1.80
-
+                rr = lo
             else:
-                rr = 2.00
-
+                rr = mid
         else:
-
-            # Dynamic RR based on soft setup quality
             if score >= 70:
-                rr = 2.0
+                rr = hi
             elif score >= 45:
-                rr = 1.75
+                rr = mid
             else:
-                rr = 1.5
+                rr = lo
 
         # Soft gate early: no HTF bias → no trade. Limit mode only needs a
         # minimal edge score, not full confluence alignment.
