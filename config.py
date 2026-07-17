@@ -80,6 +80,22 @@ TRAIL_ACTIVATION_RATIO = float(os.getenv("TRAIL_ACTIVATION_RATIO", 0.90))
 TRAIL_PERCENT = float(os.getenv("TRAIL_PERCENT", 0.3))
 
 # ==========================================================
+# Scalp pacing — force trades to resolve fast (both OFF by default so the
+# current experiment isn't silently altered; enable via env)
+# ==========================================================
+# Close any OPEN trade at market once held this many minutes without
+# resolving (0 = disabled). A scalp thesis that hasn't played out within a
+# couple of hours is dead capital tying up a slot. Trades already running on
+# a trailing stop are exempt — never evict a winner.
+MAX_HOLD_MINUTES = float(os.getenv("MAX_HOLD_MINUTES", 0))
+# Cap the stop distance at this many ATRs (0 = disabled). The structural
+# stop stays the default, but this bounds how FAR it may sit — smaller stops
+# mean faster resolution and smaller absolute risk, at the cost of more
+# stop-outs and fees eating a larger fraction of each R. Keep this ABOVE
+# MIN_SL_ATR or the cap will override the anti-stop-hunt floor.
+SL_MAX_ATR_MULT = float(os.getenv("SL_MAX_ATR_MULT", 0))
+
+# ==========================================================
 # Entry execution — prediction limits vs chase-at-market
 # ==========================================================
 # "limit"  : rest a GTC limit at a predicted institutional zone (order block,

@@ -109,6 +109,8 @@ Copy `.env.example` → `.env`. Environment variables:
 | `LIMIT_MIN_SETUP_SCORE` | `20` | Min soft setup score (HTF bias + edge) to place a limit |
 | `NEWS_FILTER_ENABLED` | `false` | Pause entries in high-impact macro windows (edit news_filter.py first) |
 | `BLOCKED_SESSIONS` | *(none)* | UTC sessions with no new entries, e.g. `asian` or `london,quiet` (valid: asian/london/ny/quiet) |
+| `MAX_HOLD_MINUTES` | `0` (off) | Time stop: market-close any OPEN trade held this long (trailing winners exempt) |
+| `SL_MAX_ATR_MULT` | `0` (off) | Cap stop distance at N×ATR (keep above MIN_SL_ATR); faster resolution, more stop-outs |
 | `AI_MAX_WEIGHT` | `0.40` | Ceiling of the model's vote in final confidence (trust ramp still applies) |
 | `AI_WEIGHT_FULL_AT` | `150` | Real closed trades at which the model reaches its full vote |
 | `SLIPPAGE_PCT` | `0.02` | Adverse slippage per side in backtests |

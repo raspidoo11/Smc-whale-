@@ -360,6 +360,51 @@ def round_price(price, market):
     return round(price, 6)
 
 
+async def close_position_market(symbol, direction, qty=None):
+    """Close an open position at market (reduce-only). Used by the time stop —
+    unlike SL/TP/trailing closes (which Bybit executes exchange-side), a
+    max-hold eviction has to be OUR order, so in live mode it must actually
+    hit the exchange, not just flip a local record. Sizes from the live
+    position, not the stored qty. Returns True when the position is flat
+    (including 'already closed'), False when the close could not be verified
+    (caller should retry next cycle)."""
+    if not EXECUTE_TRADES:
+        return True  # paper: the local record IS the position
+
+    client = get_trade_client()
+    try:
+        sym = _pybit_symbol(symbol)
+        live_size = get_open_position_size(sym)
+        if live_size is None:
+            return False
+        if live_size == 0:
+            return True  # already flat exchange-side
+
+        market = get_symbol_info(sym)
+        step = market.get("precision", {}).get("amount", 0.001) if market else 0.001
+        adjusted_qty = round(round(live_size / step) * step, 6)
+        adjusted_qty = min(adjusted_qty, live_size)
+
+        params = {
+            "category": CATEGORY,
+            "symbol": sym,
+            "side": "Sell" if direction == "LONG" else "Buy",
+            "orderType": "Market",
+            "qty": str(adjusted_qty),
+            "reduceOnly": True,
+        }
+        result = client.place_order(**params)
+        ok = bool(result) and result.get("retCode") == 0
+        if ok:
+            logger.info(f"⏱️ Market-closed {sym} (reduce-only, qty={adjusted_qty})")
+        else:
+            logger.error(f"Time-stop close failed for {sym}: {result}")
+        return ok
+    except Exception as e:
+        logger.exception(f"Time-stop close failed for {symbol}: {e}")
+        return False
+
+
 async def activate_trailing_stop(symbol, current_price, trail_percent=0.5):
     """Let a winner run: cancel the hard take-profit and attach a trailing stop.
 

@@ -24,8 +24,22 @@ from config import (
     MIN_SL_ATR,
     STRUCTURE_SL_BUFFER_ATR,
     STRUCTURE_SWING_LOOKBACK,
+    SL_MAX_ATR_MULT,
     ENTRY_MODE,
 )
+
+
+def cap_stop_distance(direction, sl, ref_price, atr):
+    """Scalp pacing: bound how FAR the structural stop may sit from the entry
+    reference. Structure placement stays the default; when SL_MAX_ATR_MULT > 0
+    the distance is clamped to that many ATRs so trades resolve on scalp
+    timescales instead of swinging for days. TP must be recomputed AFTER this
+    (it derives from the stop distance)."""
+    if SL_MAX_ATR_MULT <= 0:
+        return sl
+    if direction == "LONG":
+        return max(sl, ref_price - atr * SL_MAX_ATR_MULT)
+    return min(sl, ref_price + atr * SL_MAX_ATR_MULT)
 
 logger = logging.getLogger(__name__)
 
@@ -655,6 +669,7 @@ def get_signal(symbol, df_15m, df_5m):
         sl, structure_swing = compute_structure_stop_htf(
             direction, df_5m, df_15m, entry, atr
         )
+        sl = cap_stop_distance(direction, sl, entry, atr)
 
         if direction == "LONG":
             tp = entry + ((entry - sl) * rr)
@@ -681,9 +696,11 @@ def get_signal(symbol, df_15m, df_5m):
             )
             if direction == "LONG":
                 sl = min(sl, limit_price - atr * MIN_SL_ATR * 0.85)
+                sl = cap_stop_distance(direction, sl, limit_price, atr)
                 tp = limit_price + ((limit_price - sl) * rr)
             else:
                 sl = max(sl, limit_price + atr * MIN_SL_ATR * 0.85)
+                sl = cap_stop_distance(direction, sl, limit_price, atr)
                 tp = limit_price - ((sl - limit_price) * rr)
             invalidation_price = float(structure_swing)
             trade_entry = float(limit_price)

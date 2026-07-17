@@ -6,6 +6,7 @@ from exchange import get_exchange
 from bybit_executor import (
     EXECUTE_TRADES,
     activate_trailing_stop,
+    close_position_market,
     get_open_position_size,
     get_last_closed_pnl,
     get_order_status,
@@ -23,6 +24,7 @@ from config import (
     TRAIL_ACTIVATION_RATIO,
     LIMIT_TTL_MINUTES,
     INVALIDATE_PENDING_ON_STRUCTURE,
+    MAX_HOLD_MINUTES,
 )
 
 logger = logging.getLogger(__name__)
@@ -33,6 +35,17 @@ exchange = get_exchange()
 # stuck open (and missing from training data) forever.
 RETRY_COOLDOWN_MINUTES = 1
 MAX_ACTIVATION_ATTEMPTS = 2
+
+
+def _hold_expired(trade):
+    """Scalp pacing: has this OPEN trade overstayed MAX_HOLD_MINUTES?
+    Trades already running on a trailing stop are exempt — a winner being
+    trailed is never evicted; the time stop only clears DEAD trades that
+    neither hit SL nor reached the trail zone."""
+    if MAX_HOLD_MINUTES <= 0 or trade.get("trailing_stop_active"):
+        return False
+    held = _minutes_since(trade.get("filled_at") or trade.get("placed_at"))
+    return held is not None and held > MAX_HOLD_MINUTES
 
 
 def tp_progress(direction, entry, tp, price):
@@ -377,6 +390,18 @@ async def monitor_trades():
                 # the way to TP (e.g. 97%) rather than AT tp — so we can cancel
                 # the hard TP and let the winner run past it.
                 near_tp = tp_progress(direction, entry, tp, current_price) >= TRAIL_ACTIVATION_RATIO
+
+                # ---- Time stop (scalp pacing): evict trades that have gone
+                # nowhere for MAX_HOLD_MINUTES. SL and trail-arming take
+                # priority; live closes must succeed on the exchange first.
+                if not hit_sl and not near_tp and _hold_expired(trade):
+                    if not await close_position_market(symbol, direction, qty):
+                        continue  # couldn't verify exchange close — retry next cycle
+                    logger.info(f"⏱️ Time stop on {symbol} after {MAX_HOLD_MINUTES:.0f} min")
+                    open_trades.remove(trade)
+                    trades_changed = True
+                    await _close_trade_record(trade, current_price, "Time Stop (max hold)")
+                    continue
 
                 if hit_sl:
                     exit_price = sl
