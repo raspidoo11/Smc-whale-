@@ -26,7 +26,6 @@ import pandas as pd
 import strategy
 from config import (
     START_BALANCE,
-    MAX_HOLD_MINUTES,
     TRAIL_PERCENT,
     TRAIL_ACTIVATION_RATIO,
     ENTRY_MODE,
@@ -70,15 +69,12 @@ def _simulate_limit_fill(
     return None
 
 
-def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, activation_ratio,
-                   max_hold_bars=0):
+def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, activation_ratio):
     """Walk future candles; return (exit_price, reason, bars_held).
 
     Mirrors live behavior: the hard TP is replaced by a trailing stop once price
     reaches `activation_ratio` of the way to TP (e.g. 97%), so a winner can run
-    PAST tp instead of being capped there. max_hold_bars > 0 adds the time
-    stop: a trade that has neither stopped out nor started trailing by then is
-    closed at that bar's close (same eviction the live monitor applies).
+    PAST tp instead of being capped there.
     """
     # Price at which the trailing stop takes over (just short of TP).
     if direction == "LONG":
@@ -106,30 +102,16 @@ def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, act
                     trailing, anchor = True, l
 
         if trailing:
-            # Match trade_monitor.trail_stop_price: cap trail distance at half
-            # of open profit so tight scalps don't pin every exit to entry
-            # (paper balance was getting $0 on "WIN" trail hits).
             if direction == "LONG":
                 anchor = max(anchor, h)
-                pct_dist = abs(anchor) * trail_pct / 100.0
-                open_profit = abs(anchor - entry)
-                dist = min(pct_dist, open_profit * 0.5) if open_profit > 0 else pct_dist
-                stop = max(anchor - dist, entry)
+                stop = anchor * (1 - trail_pct / 100)
                 if l <= stop:
                     return stop, "Trailing Stop Hit", k + 1
             else:
                 anchor = min(anchor, l)
-                pct_dist = abs(anchor) * trail_pct / 100.0
-                open_profit = abs(entry - anchor)
-                dist = min(pct_dist, open_profit * 0.5) if open_profit > 0 else pct_dist
-                stop = min(anchor + dist, entry)
+                stop = anchor * (1 + trail_pct / 100)
                 if h >= stop:
                     return stop, "Trailing Stop Hit", k + 1
-
-        # Time stop: same eviction the live monitor applies — only for trades
-        # that are neither stopped out nor trailing by the max-hold bar.
-        if max_hold_bars and not trailing and (k + 1) >= max_hold_bars:
-            return float(closes[k]), "Time Stop (max hold)", k + 1
 
     # Never exited within available data -> close at final candle's close.
     return float(closes[-1]) if n else None, "Open at data end", n
@@ -237,7 +219,6 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False, context_provider=None):
                 direction, entry, sl, tp,
                 highs[start:], lows[start:], closes[start:],
                 TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO,
-                max_hold_bars=int(MAX_HOLD_MINUTES / 5) if MAX_HOLD_MINUTES > 0 else 0,
             )
             if exit_price is None:
                 break

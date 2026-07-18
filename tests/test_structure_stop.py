@@ -13,26 +13,15 @@ import pytest
 
 import strategy
 from strategy import compute_structure_stop, compute_structure_stop_htf, get_signal
+from config import MIN_SL_ATR, STRUCTURE_SL_BUFFER_ATR
 from test_feature_parity import _breakout_df
 
 
 @pytest.fixture(autouse=True)
-def _structure_test_knobs(monkeypatch):
-    """Pin classic structure math so these tests don't drift with scalp defaults
-    (shorter lookback / stop cap / tighter MIN_SL_ATR)."""
+def _clear_recent_signals():
     strategy.recent_signals.clear()
-    monkeypatch.setattr(strategy, "STRUCTURE_SWING_LOOKBACK", 20)
-    monkeypatch.setattr(strategy, "STRUCTURE_SL_BUFFER_ATR", 0.25)
-    monkeypatch.setattr(strategy, "MIN_SL_ATR", 1.15)
-    monkeypatch.setattr(strategy, "SL_MAX_ATR_MULT", 0)
-    monkeypatch.setattr(strategy, "ENTRY_MODE", "limit")
     yield
     strategy.recent_signals.clear()
-
-
-# Local aliases used by assertions (match the knobs above).
-MIN_SL_ATR = 1.15
-STRUCTURE_SL_BUFFER_ATR = 0.25
 
 
 def _ohlcv_with_swing(n=40, swing_low=98.0, swing_high=102.0, last_close=100.0):

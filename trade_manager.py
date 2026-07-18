@@ -1,7 +1,6 @@
 import json
 import os
 import logging
-import time
 from datetime import datetime, timedelta, timezone
 
 from config import DATA_DIR, DAILY_LOSS_LIMIT
@@ -18,37 +17,6 @@ COOLDOWN_FILE = os.path.join(DATA_DIR, "cooldowns.json")
 # concurrency + queryable history and auto-migrates existing JSON on first run.
 # The JSON backend is kept as a fallback / for tests.
 STORAGE_BACKEND = os.getenv("STORAGE_BACKEND", "sqlite").lower()
-
-# In-process de-dupe: monitor + reconcile can both notice the same exchange
-# close within seconds. Only the first successful close alert is sent.
-_CLOSE_ALERT_SENT = {}  # key -> monotonic timestamp
-_CLOSE_ALERT_TTL_SEC = 3600
-
-
-def _close_alert_key(trade=None, symbol=None, trade_no=None):
-    if trade is not None:
-        trade_no = trade.get("trade_no") if trade_no is None else trade_no
-        symbol = trade.get("symbol") if symbol is None else symbol
-    if trade_no is not None and trade_no != "":
-        return f"no:{trade_no}"
-    return f"sym:{symbol or '?'}"
-
-
-def claim_close_alert(trade=None, symbol=None, trade_no=None):
-    """Return True only once per closed trade (suppresses duplicate Telegram
-    close alerts from monitor vs reconcile vs a resurrected open row)."""
-    now = time.monotonic()
-    # Drop expired keys so the set cannot grow forever.
-    expired = [k for k, ts in _CLOSE_ALERT_SENT.items() if now - ts > _CLOSE_ALERT_TTL_SEC]
-    for k in expired:
-        _CLOSE_ALERT_SENT.pop(k, None)
-
-    key = _close_alert_key(trade=trade, symbol=symbol, trade_no=trade_no)
-    if key in _CLOSE_ALERT_SENT:
-        logger.info(f"🔕 Suppressing duplicate close alert for {key}")
-        return False
-    _CLOSE_ALERT_SENT[key] = now
-    return True
 
 # ==================== JSON HELPERS ====================
 
@@ -95,12 +63,6 @@ def save_balance(data):
     if STORAGE_BACKEND == "sqlite":
         import db
         db.kv_set("balance", data)
-        # Mirror to paper_balance.json so operators inspecting the file (and
-        # legacy tools) see the same numbers as the SQLite source of truth.
-        try:
-            save_json(BALANCE_FILE, data)
-        except Exception:
-            pass
     else:
         save_json(BALANCE_FILE, data)
 
@@ -142,18 +104,10 @@ def add_trade(trade):
     save_open_trades(trades)
     logger.info(f"Trade added: {trade['symbol']}")
 
-def close_trade(symbol, exit_price, result, extra_fields=None, balance_delta=None, trade_no=None):
+def close_trade(symbol, exit_price, result, extra_fields=None):
     """
     extra_fields: optional dict merged into the trade BEFORE it's written to
     trade_history.json (e.g. {"pnl": ..., "entry_fee": ..., "exit_fee": ...}).
-
-    balance_delta: when provided, applied to paper balance in the SAME close
-    (history + open-list + balance). Callers used to close first and call
-    update_balance second — a failed/skipped second step left WIN/LOSS rows
-    in history with a frozen paper balance (classic trailing-stop symptom).
-
-    trade_no: preferred match key when present (avoids closing the wrong row
-    if two records ever share a symbol).
 
     Previously, callers (paper_trader.py) mutated the dict this function
     *returned*, AFTER save_trade_history() had already run. Since
@@ -169,17 +123,7 @@ def close_trade(symbol, exit_price, result, extra_fields=None, balance_delta=Non
     closed_trade = None
 
     for trade in trades:
-        is_open = trade.get("status") == "OPEN"
-        if not is_open or closed_trade is not None:
-            remaining.append(trade)
-            continue
-
-        if trade_no is not None:
-            matched = trade.get("trade_no") == trade_no
-        else:
-            matched = trade.get("symbol") == symbol
-
-        if matched:
+        if trade.get("symbol") == symbol and trade.get("status") == "OPEN" and closed_trade is None:
             trade["status"] = result
             trade["exit_price"] = float(exit_price)
             if extra_fields:
@@ -199,24 +143,13 @@ def close_trade(symbol, exit_price, result, extra_fields=None, balance_delta=Non
         if result == "LOSS":
             set_cooldown(symbol, minutes=60)
 
-        # Atomic paper-balance credit/debit — same close as history write.
-        if balance_delta is not None:
-            data = get_balance()
-            data["balance"] = float(data.get("balance", 0) or 0) + float(balance_delta)
-            data["daily_pnl"] = float(data.get("daily_pnl", 0) or 0) + float(balance_delta)
-            save_balance(data)
-            logger.info(
-                f"💰 Balance updated by {float(balance_delta):+.4f} -> "
-                f"{float(data['balance']):.4f} (daily {float(data['daily_pnl']):+.4f})"
-            )
-
     save_open_trades(remaining)
     return closed_trade
 
 def update_balance(pnl):
     data = get_balance()
-    data["balance"] = float(data.get("balance", 0) or 0) + float(pnl)
-    data["daily_pnl"] = float(data.get("daily_pnl", 0) or 0) + float(pnl)
+    data["balance"] += pnl
+    data["daily_pnl"] += pnl
     save_balance(data)
     return data
 

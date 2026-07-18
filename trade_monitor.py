@@ -1,17 +1,11 @@
 import logging
 import asyncio
 from datetime import datetime, timezone
-from trade_manager import (
-    get_open_trades,
-    save_open_trades,
-    get_balance,
-    claim_close_alert,
-)
+from trade_manager import get_open_trades, save_open_trades, get_balance
 from exchange import get_exchange
 from bybit_executor import (
     EXECUTE_TRADES,
     activate_trailing_stop,
-    close_position_market,
     get_open_position_size,
     get_last_closed_pnl,
     get_order_status,
@@ -29,7 +23,6 @@ from config import (
     TRAIL_ACTIVATION_RATIO,
     LIMIT_TTL_MINUTES,
     INVALIDATE_PENDING_ON_STRUCTURE,
-    MAX_HOLD_MINUTES,
 )
 
 logger = logging.getLogger(__name__)
@@ -40,17 +33,6 @@ exchange = get_exchange()
 # stuck open (and missing from training data) forever.
 RETRY_COOLDOWN_MINUTES = 1
 MAX_ACTIVATION_ATTEMPTS = 2
-
-
-def _hold_expired(trade):
-    """Scalp pacing: has this OPEN trade overstayed MAX_HOLD_MINUTES?
-    Trades already running on a trailing stop are exempt — a winner being
-    trailed is never evicted; the time stop only clears DEAD trades that
-    neither hit SL nor reached the trail zone."""
-    if MAX_HOLD_MINUTES <= 0 or trade.get("trailing_stop_active"):
-        return False
-    held = _minutes_since(trade.get("filled_at") or trade.get("placed_at"))
-    return held is not None and held > MAX_HOLD_MINUTES
 
 
 def tp_progress(direction, entry, tp, price):
@@ -90,77 +72,20 @@ def _minutes_since(iso_timestamp):
 async def _close_trade_record(trade, exit_price, exit_reason):
     """Shared close path so trailing-stop closes get recorded exactly like SL
     closes: same balance update, same trade_history write, same alert style.
-
-    Returns net pnl (float) on success, or None if the trade was already
-    closed elsewhere (caller must NOT drop it from the in-memory list in
-    that case without checking — usually it is already gone on disk).
-    """
+    Relies on close_paper_trade_with_fees internally calling
+    trade_manager.close_trade()."""
     from paper_trader import close_paper_trade_with_fees
     pnl_after_fees = close_paper_trade_with_fees(trade, exit_price, exit_reason)
 
     # None = the trade was already closed by another path (e.g. reconcile) —
     # balance untouched, and no second close alert.
     if pnl_after_fees is None:
-        return None
+        return
 
-    # claim_close_alert: even if two paths both manage to close (or one
-    # resurrects the row briefly), Telegram only fires once per trade_no.
-    if claim_close_alert(trade):
-        balance = get_balance()["balance"]
-        await send_alert(
-            format_close_alert(trade, exit_price, exit_reason, pnl_after_fees, balance)
-        )
+    balance = get_balance()["balance"]
+    await send_alert(format_close_alert(trade, exit_price, exit_reason, pnl_after_fees, balance))
     # Retraining is intentionally NOT triggered here — it runs on its own
     # 10-minute schedule in main.py, decoupled from the monitor hot path.
-    return pnl_after_fees
-
-
-def _fee_aware_breakeven(direction, entry, fee_rate):
-    """Minimum favorable exit so net PnL after a single-side fee is still >= 0.
-
-    Paper close math is (exit - entry)*qty - exit*fee for LONG (and the
-    symmetric form for SHORT). Solving for exit gives a tiny buffer above
-    (LONG) / below (SHORT) entry — enough that a trail fill never flips to
-    LOSS purely from fee rounding after the trade already reached the arm zone.
-    """
-    entry = float(entry)
-    fee_rate = float(fee_rate)
-    if fee_rate <= 0 or fee_rate >= 1:
-        return entry
-    if direction == "LONG":
-        return entry / (1.0 - fee_rate)
-    return entry / (1.0 + fee_rate)
-
-
-def trail_stop_price(direction, anchor, trail_percent, entry, fee_rate=0.0):
-    """Ratcheting trail stop with profit lock + fee-aware breakeven floor.
-
-    Once trailing is armed the trade has already travelled ~TRAIL_ACTIVATION_RATIO
-    of the way to TP. A pure percent-of-price trail is often *wider* than the
-    locked-in scalp progress (e.g. 0.3% trail vs 0.27% open profit at arm),
-    which pinned every paper trail exit to pure breakeven and credited ~$0
-    to the paper balance even on "WIN" trail hits.
-
-    Fix: trail distance = min(pct-of-price, 50% of open profit), then floor
-    at fee-aware BE so an armed trail never becomes a LOSS.
-    """
-    trail = float(trail_percent)
-    anchor = float(anchor)
-    entry = float(entry)
-    be = _fee_aware_breakeven(direction, entry, fee_rate)
-
-    pct_dist = abs(anchor) * trail / 100.0
-    open_profit = abs(anchor - entry)
-    if open_profit > 0:
-        dist = min(pct_dist, open_profit * 0.5)
-    else:
-        dist = pct_dist
-
-    if direction == "LONG":
-        raw = anchor - dist
-        return max(raw, be)
-    raw = anchor + dist
-    return min(raw, be)
 
 
 async def _handle_paper_trailing(trade, symbol, direction, current_price, open_trades):
@@ -171,39 +96,28 @@ async def _handle_paper_trailing(trade, symbol, direction, current_price, open_t
     logged two 'activation failed' errors and force-closed the trade at market
     with the ugly reason 'Trailing Stop Failed - Forced Close'. Now the trail
     anchor ratchets with favorable price and the trade closes when price
-    retraces from the best level. Returns True if the trade was closed and
-    removed from the in-memory list."""
-    from paper_trader import FEE_RATE
-
+    retraces TRAIL_PERCENT from the best level — the same behavior the live
+    Bybit trailing stop provides. Returns True if the trade was closed."""
     trail = float(trade.get("trail_percent", TRAIL_PERCENT))
     anchor = float(trade.get("trail_anchor", current_price))
-    entry = float(trade.get("entry", 0) or 0)
 
     if direction == "LONG":
         anchor = max(anchor, current_price)
-        stop_price = trail_stop_price("LONG", anchor, trail, entry, FEE_RATE)
+        stop_price = anchor * (1 - trail / 100)
         breached = current_price <= stop_price
     else:
         anchor = min(anchor, current_price)
-        stop_price = trail_stop_price("SHORT", anchor, trail, entry, FEE_RATE)
+        stop_price = anchor * (1 + trail / 100)
         breached = current_price >= stop_price
 
     if breached:
         logger.info(f"✅ {symbol} paper trailing stop hit at ~{stop_price:.6f}")
-        # Close FIRST (credits paper balance atomically). Only then drop from
-        # the in-memory list — removing first and then failing close left
-        # trades gone from open_trades with no history and no balance credit.
-        pnl = await _close_trade_record(trade, stop_price, "Trailing Stop Hit")
-        if pnl is not None and trade in open_trades:
-            open_trades.remove(trade)
-            return True
-        if pnl is not None:
-            return True
-        return False
+        open_trades.remove(trade)
+        await _close_trade_record(trade, stop_price, "Trailing Stop Hit")
+        return True
 
     # Ratchet the anchor forward; caller persists via trades_changed.
     trade["trail_anchor"] = anchor
-    trade["trail_stop"] = stop_price
     return False
 
 
@@ -403,12 +317,9 @@ async def monitor_trades():
                             exit_price = current_price
                             exit_reason = "Trailing Stop Hit (approx exit price)"
                         logger.info(f"✅ {symbol} closed via trailing stop at ~${exit_price:.6f}")
-                        pnl = await _close_trade_record(trade, exit_price, exit_reason)
-                        if pnl is not None and trade in open_trades:
-                            open_trades.remove(trade)
-                            trades_changed = True
-                        elif pnl is not None:
-                            trades_changed = True
+                        open_trades.remove(trade)
+                        trades_changed = True
+                        await _close_trade_record(trade, exit_price, exit_reason)
                     continue
 
                 # ============================================================
@@ -426,71 +337,15 @@ async def monitor_trades():
                 # the hard TP and let the winner run past it.
                 near_tp = tp_progress(direction, entry, tp, current_price) >= TRAIL_ACTIVATION_RATIO
 
-                # ---- Time stop (scalp pacing): evict trades that have gone
-                # nowhere for MAX_HOLD_MINUTES. SL and trail-arming take
-                # priority; live closes must succeed on the exchange first.
-                if not hit_sl and not near_tp and _hold_expired(trade):
-                    if not await close_position_market(symbol, direction, qty):
-                        continue  # couldn't verify exchange close — retry next cycle
-                    logger.info(f"⏱️ Time stop on {symbol} after {MAX_HOLD_MINUTES:.0f} min")
-                    pnl = await _close_trade_record(trade, current_price, "Time Stop (max hold)")
-                    if pnl is not None and trade in open_trades:
-                        open_trades.remove(trade)
-                        trades_changed = True
-                    elif pnl is not None:
-                        trades_changed = True
-                    continue
-
                 if hit_sl:
                     exit_price = sl
-                    # Live/demo: Bybit owns the protective SL attached at entry.
-                    # Closing the local record while size is still open orphans a
-                    # real position (ticker can touch SL before mark-price SL
-                    # fills — common on tight scalps). Wait until flat, then
-                    # record; reconcile is the backup if price recovers first.
-                    if EXECUTE_TRADES:
-                        live_size = get_open_position_size(symbol)
-                        if live_size is None:
-                            continue
-                        if live_size > 0:
-                            continue
-                        closed_info = get_last_closed_pnl(symbol) or {}
-                        if closed_info.get("exit_price"):
-                            exit_price = closed_info["exit_price"]
                     logger.info(f"🚨 Stop Loss Hit on {symbol} at ${exit_price:.6f}")
-                    pnl = await _close_trade_record(trade, exit_price, "Stop Loss Hit")
-                    if pnl is not None and trade in open_trades:
-                        open_trades.remove(trade)
-                        trades_changed = True
-                    elif pnl is not None:
-                        trades_changed = True
+                    open_trades.remove(trade)
+                    trades_changed = True
+                    await _close_trade_record(trade, exit_price, "Stop Loss Hit")
                     continue
 
-                # Hard TP (scalp default): TRAIL_ACTIVATION_RATIO >= 1.0 means
-                # we do NOT arm a trail — take the fixed TP and free the slot.
-                progress = tp_progress(direction, entry, tp, current_price)
-                hit_tp = progress >= 1.0
-                if hit_tp and TRAIL_ACTIVATION_RATIO >= 1.0:
-                    exit_price = tp
-                    if EXECUTE_TRADES:
-                        live_size = get_open_position_size(symbol)
-                        if live_size is None:
-                            continue
-                        if live_size > 0:
-                            continue  # wait for exchange TP fill
-                        closed_info = get_last_closed_pnl(symbol) or {}
-                        if closed_info.get("exit_price"):
-                            exit_price = closed_info["exit_price"]
-                    logger.info(f"🎯 Take Profit Hit on {symbol} at ${exit_price:.6f}")
-                    pnl = await _close_trade_record(trade, exit_price, "Take Profit Hit")
-                    if pnl is not None and trade in open_trades:
-                        open_trades.remove(trade)
-                        trades_changed = True
-                    elif pnl is not None:
-                        trades_changed = True
-                    continue
-
-                if near_tp and TRAIL_ACTIVATION_RATIO < 1.0:
+                if near_tp:
                     # ---- Paper: arm the simulated trailing stop ----
                     if not EXECUTE_TRADES:
                         trade["trailing_stop_active"] = True
@@ -513,18 +368,11 @@ async def monitor_trades():
                         logger.warning(
                             f"{symbol}: trailing stop failed {attempts}x, forcing close at market"
                         )
-                        # MUST hit the exchange — a local-only close leaves a
-                        # live position running with no bot management.
-                        if not await close_position_market(symbol, direction, qty):
-                            continue
-                        pnl = await _close_trade_record(
+                        open_trades.remove(trade)
+                        trades_changed = True
+                        await _close_trade_record(
                             trade, current_price, "Trailing Stop Failed - Forced Close"
                         )
-                        if pnl is not None and trade in open_trades:
-                            open_trades.remove(trade)
-                            trades_changed = True
-                        elif pnl is not None:
-                            trades_changed = True
                         continue
 
                     logger.info(f"🚀 Activating trailing stop on {symbol} (near TP)")
@@ -553,22 +401,7 @@ async def monitor_trades():
                 logger.exception(f"❌ Error monitoring trade {trade.get('symbol')}: {e}")
 
         if trades_changed:
-            # Persist only trades still open on disk identity. close_trade()
-            # already wrote the open list without closed rows; a naive save of
-            # a stale in-memory list can resurrect a closed trade and fire a
-            # second close alert on the next cycle.
-            still_open_keys = {
-                (t.get("trade_no"), t.get("symbol"))
-                for t in get_open_trades()
-                if t.get("status") in ("OPEN", "PENDING")
-            }
-            to_save = [
-                t for t in open_trades
-                if (t.get("trade_no"), t.get("symbol")) in still_open_keys
-                or t.get("status") == "PENDING"
-            ]
-            # Prefer memory copies for still-open rows (trail_anchor etc.).
-            save_open_trades(to_save)
+            save_open_trades(open_trades)
 
     except Exception as e:
         logger.exception(f"❌ Monitor trades failed: {e}")

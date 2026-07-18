@@ -2,7 +2,6 @@ import logging
 import os
 import time
 import uuid
-from decimal import Decimal, ROUND_DOWN, ROUND_HALF_UP, InvalidOperation
 from exchange import get_trade_client, get_exchange
 from trade_manager import get_risk_amount
 from xgboost_trainer import get_ai_risk_percent
@@ -22,131 +21,6 @@ def _pybit_symbol(symbol):
     """Normalize any symbol form to Bybit's ('BTCUSDT').
     Accepts ccxt unified ('BTC/USDT:USDT') or already-clean ('BTCUSDT')."""
     return symbol.split(":")[0].replace("/", "").replace("-", "").upper()
-
-
-def _to_decimal(value):
-    """Float-safe Decimal: avoid binary float repr pollution via str()."""
-    if isinstance(value, Decimal):
-        return value
-    if value is None:
-        raise InvalidOperation("None")
-    return Decimal(str(value))
-
-
-def _qty_step(market):
-    """Lot step size from Bybit lotSizeFilter when present, else ccxt precision."""
-    if not market:
-        return Decimal("0.001")
-    info = market.get("info") or {}
-    lot = info.get("lotSizeFilter") or {}
-    for key in ("qtyStep", "minOrderQty"):
-        raw = lot.get(key)
-        if raw not in (None, ""):
-            try:
-                step = _to_decimal(raw)
-                if step > 0:
-                    return step
-            except (InvalidOperation, ValueError):
-                pass
-    step = market.get("precision", {}).get("amount")
-    if step not in (None, 0, 0.0):
-        try:
-            # ccxt sometimes stores amount precision as decimal places (int >= 1)
-            # and sometimes as a step float (0.001). Treat integers >= 1 as
-            # decimal-place counts only when they look like place counts.
-            d = _to_decimal(step)
-            if d >= 1 and d == d.to_integral_value() and d <= 12:
-                # Ambiguous: DOGE step is 1.0 (real lot step). Prefer lotSizeFilter
-                # above; if we got here, treat as step size 1, not 0.1 places.
-                return d
-            if d > 0:
-                return d
-        except (InvalidOperation, ValueError):
-            pass
-    return Decimal("0.001")
-
-
-def _price_tick(market):
-    """Price tick size from Bybit priceFilter when present, else ccxt precision."""
-    if not market:
-        return None
-    info = market.get("info") or {}
-    pf = info.get("priceFilter") or {}
-    raw = pf.get("tickSize")
-    if raw not in (None, ""):
-        try:
-            tick = _to_decimal(raw)
-            if tick > 0:
-                return tick
-        except (InvalidOperation, ValueError):
-            pass
-    tick = market.get("precision", {}).get("price")
-    if tick not in (None, 0, 0.0):
-        try:
-            d = _to_decimal(tick)
-            if d >= 1 and d == d.to_integral_value() and d <= 12:
-                return Decimal("1") / (Decimal(10) ** int(d))
-            if d > 0:
-                return d
-        except (InvalidOperation, ValueError):
-            pass
-    return None
-
-
-def _min_notional(market):
-    if not market:
-        return Decimal("5")
-    info = market.get("info") or {}
-    lot = info.get("lotSizeFilter") or {}
-    raw = lot.get("minNotionalValue")
-    if raw not in (None, ""):
-        try:
-            return _to_decimal(raw)
-        except (InvalidOperation, ValueError):
-            pass
-    return Decimal("5")
-
-
-def _format_decimal(value: Decimal) -> str:
-    """Plain decimal string — Bybit rejects scientific notation and float noise
-    like '0.30000000000000004' (ErrCode 10001 Qty invalid)."""
-    normalized = value.normalize() if value != 0 else Decimal("0")
-    text = format(normalized, "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return text or "0"
-
-
-def quantize_qty(raw_qty, market):
-    """Floor quantity to the symbol's lot step. Returns (float_or_None, str_or_None)."""
-    try:
-        step = _qty_step(market)
-        q = _to_decimal(raw_qty)
-        if q <= 0 or step <= 0:
-            return None, None
-        stepped = (q / step).to_integral_value(rounding=ROUND_DOWN) * step
-        if stepped <= 0:
-            return None, None
-        return float(stepped), _format_decimal(stepped)
-    except (InvalidOperation, ValueError, TypeError):
-        return None, None
-
-
-def quantize_price(price, market):
-    """Round price to the symbol's tick. Returns (float, str) for API + local use."""
-    try:
-        p = _to_decimal(price)
-        tick = _price_tick(market)
-        if tick and tick > 0:
-            stepped = (p / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick
-            if stepped <= 0:
-                stepped = tick
-            return float(stepped), _format_decimal(stepped)
-        # No tick metadata: match legacy round_price fallback (6 d.p.).
-        cleaned = _to_decimal(round(float(p), 6))
-        return float(cleaned), _format_decimal(cleaned)
-    except (InvalidOperation, ValueError, TypeError):
-        return float(price), _format_decimal(_to_decimal(price))
 
 
 def get_symbol_info(symbol):
@@ -182,30 +56,9 @@ def get_symbol_info(symbol):
         return None
 
 
-def _live_risk_base():
-    """USD risk budget for a live/demo order.
-
-    Live sizing MUST use Bybit wallet equity, not the local paper_balance
-    seed (often START_BALANCE=100). On a fresh Lightsail/Railway volume the
-    local balance is still 100 until reconcile runs — which used to make
-    BTC/majors compute qty=0 (below min lot) and skip every order while the
-    demo/live account had plenty of equity.
-    """
-    if EXECUTE_TRADES:
-        try:
-            equity = get_wallet_balance_usdt()
-        except Exception:
-            equity = None
-        if equity is not None and equity > 0:
-            risk_percent = float(os.getenv("RISK_PERCENT", "0.5")) / 100.0
-            return round(float(equity) * risk_percent, 2)
-    return get_risk_amount()
-
-
 def calculate_proper_qty(symbol, entry_price, sl_price, ai_prob=50, regime="ranging", recent_drawdown=0.0):
     """
     Calculate quantity using AI-driven dynamic risk sizing.
-    Returns a float stepped to the exchange lot size, or None if untradeable.
     """
     market = get_symbol_info(symbol)
     if not market:
@@ -213,56 +66,33 @@ def calculate_proper_qty(symbol, entry_price, sl_price, ai_prob=50, regime="rang
         return None
 
     try:
-        risk_per_unit = abs(float(entry_price) - float(sl_price))
+        risk_per_unit = abs(entry_price - sl_price)
         if risk_per_unit == 0:
             return None
 
-        base_risk = _live_risk_base()
+        # Get base risk amount (0.5% of balance)
+        base_risk = get_risk_amount()
 
         # Adjust risk using AI confidence
         adjusted_risk = base_risk * (get_ai_risk_percent(ai_prob, recent_drawdown, regime) / 0.5)
 
         raw_qty = adjusted_risk / risk_per_unit
 
-        qty, qty_str = quantize_qty(raw_qty, market)
-        if qty is None:
-            logger.warning(
-                f"Quantity rounds to 0 for {symbol} "
-                f"(raw={raw_qty:.8f}, risk=${adjusted_risk:.2f}, risk/unit={risk_per_unit:.6f})"
-            )
-            return None
+        # Apply exchange precision
+        step = market.get("precision", {}).get("amount", 0.001)
+        qty = round(raw_qty / step) * step
 
-        min_qty = market.get("limits", {}).get("amount", {}).get("min") or 0
-        max_qty = market.get("limits", {}).get("amount", {}).get("max") or 999999
-        try:
-            min_qty = float(min_qty)
-            max_qty = float(max_qty)
-        except (TypeError, ValueError):
-            min_qty, max_qty = 0.0, 999999.0
+        # Check limits
+        min_qty = market.get("limits", {}).get("amount", {}).get("min", 0)
+        max_qty = market.get("limits", {}).get("amount", {}).get("max", 999999)
 
         if qty < min_qty:
-            logger.warning(
-                f"Quantity {qty_str} below minimum {min_qty} for {symbol} "
-                f"(risk=${adjusted_risk:.2f})"
-            )
+            logger.warning(f"Quantity {qty} below minimum for {symbol}")
             return None
         if qty > max_qty:
-            qty, qty_str = quantize_qty(max_qty, market)
-            if qty is None:
-                return None
+            qty = max_qty
 
-        # Bybit linear min notional (typically $5). Below this the order is
-        # rejected with a qty/notional error even when lot size is valid.
-        notional = Decimal(str(qty)) * _to_decimal(entry_price)
-        min_n = _min_notional(market)
-        if notional < min_n:
-            logger.warning(
-                f"Notional {float(notional):.4f} < min {min_n} for {symbol} "
-                f"(qty={qty_str})"
-            )
-            return None
-
-        return qty
+        return round(qty, 6)
 
     except Exception as e:
         logger.exception(f"Quantity calculation failed for {symbol}: {e}")
@@ -308,22 +138,15 @@ async def execute_trade(signal):
         symbol = signal["symbol"].split(":")[0].replace("/", "").upper()
         direction = signal["direction"]
         entry = float(signal["entry"])
-        sl = float(signal.get("sl", 0) or 0)
-        tp = float(signal.get("tp", 0) or 0)
+        sl = float(signal.get("sl", 0))
+        tp = float(signal.get("tp", 0))
         ai_prob = float(signal.get("ai_prob", 50))
         regime = signal.get("market_regime", "ranging")
 
-        market = get_symbol_info(symbol)
-
-        # Calculate quantity using AI risk sizing (live equity when possible)
+        # Calculate quantity using AI risk sizing
         qty = calculate_proper_qty(symbol, entry, sl, ai_prob=ai_prob, regime=regime)
         if not qty:
             logger.error(f"❌ Invalid quantity for {symbol}")
-            return None
-
-        _, qty_str = quantize_qty(qty, market)
-        if not qty_str:
-            logger.error(f"❌ Could not format quantity for {symbol}: {qty}")
             return None
 
         # Set leverage
@@ -343,24 +166,17 @@ async def execute_trade(signal):
             "symbol": symbol,
             "side": side,
             "orderType": "Limit" if is_limit else "Market",
-            "qty": qty_str,
+            "qty": str(qty),
         }
 
         if is_limit:
-            entry_f, entry_str = quantize_price(entry, market)
-            params["price"] = entry_str
+            params["price"] = str(entry)
             params["timeInForce"] = "GTC"
-            # Keep local record on the same tick Bybit accepted.
-            signal["entry"] = entry_f
 
         if sl:
-            sl_f, sl_str = quantize_price(sl, market)
-            params["stopLoss"] = sl_str
-            signal["sl"] = sl_f
+            params["stopLoss"] = str(sl)
         if tp:
-            tp_f, tp_str = quantize_price(tp, market)
-            params["takeProfit"] = tp_str
-            signal["tp"] = tp_f
+            params["takeProfit"] = str(tp)
 
         # Idempotency key: the SAME orderLinkId is reused across retries, so if
         # an attempt actually reached Bybit but the response timed out, the
@@ -392,28 +208,19 @@ async def execute_trade(signal):
                     break
                 if attempt == 2:
                     raise e
-                logger.warning(f"Retrying order ({attempt + 1}/3): {e}")
+                logger.warning(f"Retrying order ({attempt + 1}/3)")
                 time.sleep(1.5)
 
         logger.info(f"📥 Bybit response: {result}")
 
-        # Only treat a real acceptance as success. A non-zero retCode (or an
-        # empty body) used to fall through as a truthy dict, so main.py would
-        # record a local OPEN/PENDING trade that never existed on Bybit.
-        if not result or result.get("retCode") != 0:
-            logger.error(
-                f"❌ Bybit rejected order for {symbol}: "
-                f"retCode={result.get('retCode') if result else None} "
-                f"retMsg={result.get('retMsg') if result else None}"
-            )
-            return None
+        if result and result.get("retCode") == 0:
+            # Write the EXECUTED qty back onto the trade record. The caller
+            # sized qty with the paper formula; Bybit got THIS qty — every
+            # close alert / PnL / R calculation must use the real one, or a
+            # trailing-stop win shows a sliver of the actual profit.
+            signal["qty"] = float(qty)
+            logger.info(f"✅ Order placed: {symbol} | Qty: {qty} | AI Risk Adjusted")
 
-        # Write the EXECUTED qty back onto the trade record. The caller
-        # sized qty with the paper formula; Bybit got THIS qty — every
-        # close alert / PnL / R calculation must use the real one, or a
-        # trailing-stop win shows a sliver of the actual profit.
-        signal["qty"] = float(qty)
-        logger.info(f"✅ Order placed: {symbol} | Qty: {qty_str} | AI Risk Adjusted")
         return result
 
     except Exception as e:
@@ -543,56 +350,14 @@ def get_wallet_balance_usdt():
 
 def round_price(price, market):
     """Round a price to the symbol's tick size (Bybit rejects off-tick prices)."""
-    rounded, _ = quantize_price(price, market)
-    return rounded
-
-
-async def close_position_market(symbol, direction, qty=None):
-    """Close an open position at market (reduce-only). Used by the time stop —
-    unlike SL/TP/trailing closes (which Bybit executes exchange-side), a
-    max-hold eviction has to be OUR order, so in live mode it must actually
-    hit the exchange, not just flip a local record. Sizes from the live
-    position, not the stored qty. Returns True when the position is flat
-    (including 'already closed'), False when the close could not be verified
-    (caller should retry next cycle)."""
-    if not EXECUTE_TRADES:
-        return True  # paper: the local record IS the position
-
-    client = get_trade_client()
-    try:
-        sym = _pybit_symbol(symbol)
-        live_size = get_open_position_size(sym)
-        if live_size is None:
-            return False
-        if live_size == 0:
-            return True  # already flat exchange-side
-
-        market = get_symbol_info(sym)
-        # Size from the live position (not the stored trade qty), stepped to
-        # the lot size so Bybit never sees float garbage like 0.300...004.
-        _adjusted, qty_str = quantize_qty(live_size, market)
-        if not qty_str:
-            logger.error(f"Time-stop close: cannot format qty for {sym} size={live_size}")
-            return False
-
-        params = {
-            "category": CATEGORY,
-            "symbol": sym,
-            "side": "Sell" if direction == "LONG" else "Buy",
-            "orderType": "Market",
-            "qty": qty_str,
-            "reduceOnly": True,
-        }
-        result = client.place_order(**params)
-        ok = bool(result) and result.get("retCode") == 0
-        if ok:
-            logger.info(f"⏱️ Market-closed {sym} (reduce-only, qty={qty_str})")
-        else:
-            logger.error(f"Time-stop close failed for {sym}: {result}")
-        return ok
-    except Exception as e:
-        logger.exception(f"Time-stop close failed for {symbol}: {e}")
-        return False
+    if not market:
+        return round(price, 6)
+    tick = market.get("precision", {}).get("price")
+    if tick and tick < 1:  # ccxt gives the tick size as a float step
+        return round(round(price / tick) * tick, 10)
+    if tick and tick >= 1:  # some markets express precision as decimal places
+        return round(price, int(tick))
+    return round(price, 6)
 
 
 async def activate_trailing_stop(symbol, current_price, trail_percent=0.5):
@@ -628,16 +393,14 @@ async def activate_trailing_stop(symbol, current_price, trail_percent=0.5):
         if distance <= 0:
             logger.warning(f"{sym}: computed trailing distance {distance} <= 0; skipping")
             return None
-        _, distance_str = quantize_price(distance, market)
-        _, active_str = quantize_price(current_price, market)
 
         resp = client.set_trading_stop(
             category=CATEGORY,
             symbol=sym,
             positionIdx=0,                 # one-way position mode
             takeProfit="0",                # cancel the hard TP so price can run
-            trailingStop=distance_str,
-            activePrice=active_str,
+            trailingStop=str(distance),
+            activePrice=str(round_price(current_price, market)),
         )
         logger.info(
             f"🚀 {sym}: TP cancelled, trailing stop set at {trail_percent}% "
