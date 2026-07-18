@@ -25,6 +25,12 @@ TIER1 = {'BTC', 'ETH', 'BNB', 'XRP', 'ADA', 'SOL', 'DOT', 'LINK'}
 # Stablecoins to block (stable vs stable pairs)
 STABLECOINS = {'USDC', 'USDT', 'FDUSD', 'USDE', 'TUSD', 'BUSD', 'DAI', 'PYUSD', 'GUSD', 'USDM'}
 
+# Bybit's tokenized commodity/TradFi perps (crude oil, gold, silver, nat gas,
+# index products). Ordering on these fails with ErrCode 110125 ("You must
+# agree to the Crude Oil Trading Terms...") unless special terms are accepted
+# per-account — and they're not crypto anyway. Exact-match on the base symbol.
+COMMODITY_BASES = {'CL', 'NG', 'XAU', 'XAG', 'WTI', 'BRENT', 'SPX', 'NDX', 'DJI', 'GLD'}
+
 # Cache for symbol list (update every 5 minutes)
 SYMBOL_CACHE = {
     'symbols': [],
@@ -57,10 +63,21 @@ def is_stablecoin_pair(symbol: str) -> bool:
     return False
 
 
+def is_commodity_pair(symbol: str) -> bool:
+    """Exact-match the BASE against tokenized commodity/TradFi contracts
+    (CLUSDT = crude oil, XAUUSDT = gold, ...). Exact match so real crypto
+    like 'CLV' or 'XAI' is never caught by substring accident."""
+    s = symbol.upper().split(":")[0].replace("/", "").replace("-", "")
+    for quote in ('USDT', 'USDC', 'BUSD', 'FDUSD'):
+        if s.endswith(quote):
+            return s[:-len(quote)] in COMMODITY_BASES
+    return False
+
+
 def is_meme_coin(symbol):
     """Check if symbol matches meme coin patterns"""
     base = symbol.replace('USDT', '').replace('BUSD', '').replace('USDC', '').replace('FDUSD', '')
-    
+
     for pattern in MEME_PATTERNS:
         if pattern in base:
             return True
@@ -93,7 +110,10 @@ def get_live_symbols(limit=30):
         # STABLECOIN FILTER (NEW)
         # ==========================================================
         before_count = len(usdt_pairs)
-        usdt_pairs = [s for s in usdt_pairs if not is_stablecoin_pair(s)]
+        usdt_pairs = [
+            s for s in usdt_pairs
+            if not is_stablecoin_pair(s) and not is_commodity_pair(s)
+        ]
         after_count = len(usdt_pairs)
         
         if before_count != after_count:
@@ -213,8 +233,8 @@ def validate_symbol(symbol):
         if ticker.get('bid', 0) <= 0 or ticker.get('ask', 0) <= 0:
             return False
         
-        # Also reject stablecoin pairs here as a safety net
-        if is_stablecoin_pair(symbol):
+        # Also reject stablecoin and commodity pairs here as a safety net
+        if is_stablecoin_pair(symbol) or is_commodity_pair(symbol):
             return False
             
         return True
