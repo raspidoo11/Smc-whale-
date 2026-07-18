@@ -32,6 +32,10 @@ from config import (
     LIMIT_TTL_MINUTES,
     SPREAD_MAX_FRACTION_OF_RISK,
     NEWS_FILTER_ENABLED,
+    SCAN_MODE,
+    BIAS_TF,
+    ENTRY_TF,
+    ENTRY_TF_MINUTES,
 )
 from alerts import format_open_alert, format_limit_alert
 from risk_manager import can_open_trade, blocked_session_now
@@ -125,8 +129,11 @@ async def scan():
 
             for symbol in symbols:
                 try:
-                    df_15m = get_ohlcv(symbol, "15m", 200)
-                    df_5m = get_ohlcv(symbol, "5m", 200)
+                    # Timeframes come from SCAN_MODE (scalp: 15m/5m, swing:
+                    # 4h/30m). Variable names keep the scalp-era convention;
+                    # df_15m = bias TF, df_5m = entry TF.
+                    df_15m = get_ohlcv(symbol, BIAS_TF, 200)
+                    df_5m = get_ohlcv(symbol, ENTRY_TF, 200)
 
                     if df_15m is None or df_5m is None:
                         continue
@@ -298,17 +305,19 @@ def retrain_model():
         logger.exception(f"MODEL RETRAIN FAILED: {e}")
 
 
-# Tracks which 5m candle we last scanned, so scans fire once per candle CLOSE
-# (within ~20s of it) instead of every 5 minutes from whenever the process
-# happened to boot. With the forming candle dropped in the scanner, this means
-# each scan evaluates the freshly-closed candle almost immediately, instead of
-# up to 5 minutes late.
+# Tracks which entry-TF candle we last scanned, so scans fire once per candle
+# CLOSE (within ~20s of it) instead of on a drifting wall-clock interval. With
+# the forming candle dropped in the scanner, each scan evaluates the freshly-
+# closed candle almost immediately. Bucket size follows SCAN_MODE's entry TF
+# (5m scalp, 30m swing).
 _last_scanned_bucket = None
 
 
-def _current_candle_bucket():
-    now = datetime.now(timezone.utc)
-    return now.replace(minute=now.minute - now.minute % 5, second=0, microsecond=0)
+def _current_candle_bucket(now=None):
+    now = now or datetime.now(timezone.utc)
+    total_min = now.hour * 60 + now.minute
+    floored = total_min - (total_min % ENTRY_TF_MINUTES)
+    return now.replace(hour=floored // 60, minute=floored % 60, second=0, microsecond=0)
 
 
 def run_scan_sync(force=False):
@@ -422,6 +431,8 @@ def maybe_backfill_on_start():
 
 def main():
     logger.info("🚀 Starting SMC Whale AI (Improved Version)")
+    logger.info(f"🕰️ Mode: {SCAN_MODE.upper()} — bias {BIAS_TF} / entry {ENTRY_TF} "
+                f"(scans align to {ENTRY_TF_MINUTES}m candle closes)")
     logger.info(f"📊 Max Open Trades: {MAX_OPEN_TRADES}")
     logger.info("🔒 Using asyncio.Lock() for scan protection")
     logger.info("🕒 Session bonus system enabled")

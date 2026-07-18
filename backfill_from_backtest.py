@@ -87,8 +87,13 @@ def run_backfill(symbols=None, candles=3000, max_trades=150, replace=False):
     for sym in symbols:
         try:
             logger.info(f"Backtesting {sym} ({candles} x 5m candles)...")
-            df5 = fetch_ohlcv_paginated(sym, "5m", candles)
-            df15 = fetch_ohlcv_paginated(sym, "15m", max(candles // 3, 200))
+            # Timeframes follow SCAN_MODE so the seeded training rows match
+            # the strategy this bot actually trades (scalp: 5m/15m, swing:
+            # 30m/4h). Bias-candle count scales by the TF ratio.
+            from config import BIAS_TF, ENTRY_TF, BIAS_TF_MINUTES, ENTRY_TF_MINUTES
+            bias_candles = max(int(candles * ENTRY_TF_MINUTES / BIAS_TF_MINUTES), 200)
+            df5 = fetch_ohlcv_paginated(sym, ENTRY_TF, candles)
+            df15 = fetch_ohlcv_paginated(sym, BIAS_TF, bias_candles)
 
             # Historical funding / OI / BTC trend / Fear&Greed, so backfilled
             # rows carry REAL context features instead of neutral zeros.

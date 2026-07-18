@@ -24,8 +24,20 @@ from config import (
     MIN_SL_ATR,
     STRUCTURE_SL_BUFFER_ATR,
     STRUCTURE_SWING_LOOKBACK,
+    SL_STYLE,
+    RR_LOW,
+    RR_MID,
+    RR_HIGH,
     ENTRY_MODE,
 )
+
+
+def zone_stop(direction, ref_price, atr):
+    """Tight zone-anchored stop ("strong retail" swing style): SL just beyond
+    the entry zone the limit rests at, not beyond broad dual-TF structure.
+    Zone broken = thesis dead = exit cheap; the distant TP does the earning."""
+    dist = atr * (MIN_SL_ATR + STRUCTURE_SL_BUFFER_ATR)
+    return ref_price - dist if direction == "LONG" else ref_price + dist
 
 logger = logging.getLogger(__name__)
 
@@ -619,26 +631,28 @@ def get_signal(symbol, df_15m, df_5m):
         if pd.isna(atr_average):
             atr_average = atr
 
+        # RR target from config tiers — mode-aware (scalp ~1.5-2R, swing 3-4R
+        # "small SL, big TP"). AI mode selects the tier by volatility, SMC
+        # mode by setup quality.
         if USE_XGBOOST:
 
             if atr > atr_average * 1.30:
-                rr = 2.50
+                rr = RR_HIGH
 
             elif atr < atr_average * 0.70:
-                rr = 1.80
+                rr = RR_LOW
 
             else:
-                rr = 2.00
+                rr = RR_MID
 
         else:
 
-            # Dynamic RR based on soft setup quality
             if score >= 70:
-                rr = 2.0
+                rr = RR_HIGH
             elif score >= 45:
-                rr = 1.75
+                rr = RR_MID
             else:
-                rr = 1.5
+                rr = RR_LOW
 
         # Soft gate early: no HTF bias → no trade. Limit mode only needs a
         # minimal edge score, not full confluence alignment.
@@ -650,11 +664,16 @@ def get_signal(symbol, df_15m, df_5m):
 
         direction = "LONG" if trend_bull else "SHORT"
 
-        # Structure stop from signal close first (risk geometry).
-        # Wider of 5m + 15m structure so SL is not parked under 15m bait.
-        sl, structure_swing = compute_structure_stop_htf(
-            direction, df_5m, df_15m, entry, atr
-        )
+        # Stop from signal close first (risk geometry). Structure style: wider
+        # of entry+bias TF swings (anti stop-hunt, scalp). Zone style: tight
+        # ATR-anchored stop at the entry (swing "small SL, big TP").
+        if SL_STYLE == "zone":
+            sl = zone_stop(direction, entry, atr)
+            structure_swing = sl
+        else:
+            sl, structure_swing = compute_structure_stop_htf(
+                direction, df_5m, df_15m, entry, atr
+            )
 
         if direction == "LONG":
             tp = entry + ((entry - sl) * rr)
@@ -676,14 +695,22 @@ def get_signal(symbol, df_15m, df_5m):
         # Recompute SL/TP at the *limit* so risk is measured from where we
         # actually intend to get filled (not the chase price).
         if ENTRY_MODE == "limit":
-            sl, structure_swing = compute_structure_stop_htf(
-                direction, df_5m, df_15m, limit_price, atr
-            )
+            if SL_STYLE == "zone":
+                # Tight stop just beyond the zone we intend to get filled at —
+                # the retail-strong pattern: zone invalidated = cheap exit.
+                sl = zone_stop(direction, limit_price, atr)
+                structure_swing = sl
+            else:
+                sl, structure_swing = compute_structure_stop_htf(
+                    direction, df_5m, df_15m, limit_price, atr
+                )
+                if direction == "LONG":
+                    sl = min(sl, limit_price - atr * MIN_SL_ATR * 0.85)
+                else:
+                    sl = max(sl, limit_price + atr * MIN_SL_ATR * 0.85)
             if direction == "LONG":
-                sl = min(sl, limit_price - atr * MIN_SL_ATR * 0.85)
                 tp = limit_price + ((limit_price - sl) * rr)
             else:
-                sl = max(sl, limit_price + atr * MIN_SL_ATR * 0.85)
                 tp = limit_price - ((sl - limit_price) * rr)
             invalidation_price = float(structure_swing)
             trade_entry = float(limit_price)

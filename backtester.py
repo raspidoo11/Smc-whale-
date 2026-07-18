@@ -34,13 +34,17 @@ from config import (
     MAKER_FEE_RATE,
     TAKER_FEE_RATE,
     INVALIDATE_PENDING_ON_STRUCTURE,
+    ENTRY_TF,
+    BIAS_TF,
+    ENTRY_TF_MINUTES,
 )
 
 logger = logging.getLogger(__name__)
 RISK_FRACTION = 0.05       # fraction of running equity risked per trade
 WARMUP = 60                # bars of context before the first possible signal
 WINDOW = 250               # rolling df length handed to get_signal
-LIMIT_TTL_BARS = max(1, int(LIMIT_TTL_MINUTES / 5))  # 5m bars per resting order
+# Resting-order TTL in ENTRY-TF bars (follows SCAN_MODE: 5m scalp, 30m swing).
+LIMIT_TTL_BARS = max(1, int(LIMIT_TTL_MINUTES / ENTRY_TF_MINUTES))
 
 
 def _simulate_limit_fill(
@@ -328,7 +332,7 @@ def fetch_ohlcv_paginated(symbol, timeframe, total):
     return df.set_index("timestamp")
 
 
-def backtest_symbol(symbol, candles=3000, tf5="5m", tf15="15m", use_xgboost=False):
+def backtest_symbol(symbol, candles=3000, tf5=ENTRY_TF, tf15=BIAS_TF, use_xgboost=False):
     logger.info(f"Fetching {candles} candles for {symbol} ({tf5}/{tf15})...")
     df_5m = fetch_ohlcv_paginated(symbol, tf5, candles)
     df_15m = fetch_ohlcv_paginated(symbol, tf15, max(candles // 3, 200))
@@ -358,8 +362,8 @@ def main():
     p = argparse.ArgumentParser(description="Backtest the SMC Whale strategy.")
     p.add_argument("symbol", help="ccxt symbol, e.g. 'BTC/USDT:USDT'")
     p.add_argument("--candles", type=int, default=3000, help="number of 5m candles")
-    p.add_argument("--tf5", default="5m")
-    p.add_argument("--tf15", default="15m")
+    p.add_argument("--tf5", default=ENTRY_TF, help="entry timeframe (defaults to SCAN_MODE's)")
+    p.add_argument("--tf15", default=BIAS_TF, help="bias timeframe (defaults to SCAN_MODE's)")
     p.add_argument("--xgboost", action="store_true", help="enable the AI probability layer")
     args = p.parse_args()
 

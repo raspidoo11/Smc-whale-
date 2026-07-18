@@ -23,6 +23,45 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 # ==========================================================
+# Scan mode — picks the timeframe pair AND the risk geometry the whole
+# pipeline runs on (scan fetches, candle-aligned scheduling, backfill,
+# RR/stop defaults further down).
+#   scalp : 15m bias / 5m entry  · structure stops, 1.5-2R targets
+#   swing : 4h bias / 30m entry  · tight zone stops, 3-4R targets
+# Run one bot per mode (separate dirs + API keys) to trade both.
+# ==========================================================
+SCAN_MODE = os.getenv("SCAN_MODE", "scalp").lower()
+
+SCALP_BIAS_TF = "15m"
+SCALP_ENTRY_TF = "5m"
+
+SWING_BIAS_TF = "4h"
+SWING_ENTRY_TF = "30m"
+
+
+def _tf_minutes(tf):
+    """'5m' -> 5, '30m' -> 30, '4h' -> 240, '1d' -> 1440."""
+    tf = tf.strip().lower()
+    units = {"m": 1, "h": 60, "d": 1440}
+    if not tf or tf[-1] not in units:
+        raise ValueError(f"Unrecognized timeframe: {tf!r}")
+    return int(tf[:-1]) * units[tf[-1]]
+
+
+if SCAN_MODE == "scalp":
+    BIAS_TF, ENTRY_TF = SCALP_BIAS_TF, SCALP_ENTRY_TF
+elif SCAN_MODE == "swing":
+    BIAS_TF, ENTRY_TF = SWING_BIAS_TF, SWING_ENTRY_TF
+else:
+    # Fail LOUDLY — a silently-ignored mode is how "I set it but nothing
+    # changed" happens.
+    raise ValueError(f"Unknown SCAN_MODE {SCAN_MODE!r}; valid: scalp, swing")
+
+BIAS_TF_MINUTES = _tf_minutes(BIAS_TF)
+ENTRY_TF_MINUTES = _tf_minutes(ENTRY_TF)
+_IS_SWING = SCAN_MODE == "swing"
+
+# ==========================================================
 # Account / risk
 # ==========================================================
 START_BALANCE = float(os.getenv("START_BALANCE", 100))
@@ -99,19 +138,34 @@ INVALIDATE_PENDING_ON_STRUCTURE = (
 )
 
 # ==========================================================
-# Stop placement (anti stop-hunt)
+# Risk geometry — mode-aware defaults
+# ----------------------------------------------------------
+# scalp: anti-stop-hunt STRUCTURE stops (wide, beyond dual-TF swings) with
+#        modest 1.5-2R targets.
+# swing: "strong retail" geometry — TIGHT stop just beyond the entry ZONE
+#        (the OB/FVG the limit rests at; zone broken = thesis dead, exit
+#        cheap) with DISTANT 3-4R targets. Small SL, big TP: at 3.5R the
+#        break-even win rate is only ~22%.
+# All overridable per bot via env.
 # ==========================================================
-# Old logic took a tight ATR multiple (0.7–1.0×) or a swing * 0.9995 — both
-# sit inside the noise that sweeps equal highs/lows. New policy:
-#   SL = beyond structural swing + buffer, AND at least MIN_SL_ATR from entry.
-# That is the *wider* of the two constraints (more room), never the tighter.
-# Swing is taken as the *wider* of entry TF (5m) and bias TF (15m) so the
-# stop is not parked under micro equal-lows that look like bait on 15m.
-MIN_SL_ATR = float(os.getenv("MIN_SL_ATR", 1.15))
-# Extra room past the swing so a wick through equal lows/highs doesn't tag SL.
+
+# SL_STYLE: "structure" (beyond dual-TF swings + buffer, scalp default) or
+# "zone" (tight, anchored to the entry zone, swing default).
+SL_STYLE = os.getenv("SL_STYLE", "zone" if _IS_SWING else "structure").lower()
+if SL_STYLE not in ("structure", "zone"):
+    raise ValueError(f"Unknown SL_STYLE {SL_STYLE!r}; valid: structure, zone")
+
+# RR target tiers (selected by setup quality / volatility in strategy.py).
+RR_LOW = float(os.getenv("RR_LOW", 3.0 if _IS_SWING else 1.5))
+RR_MID = float(os.getenv("RR_MID", 3.5 if _IS_SWING else 1.75))
+RR_HIGH = float(os.getenv("RR_HIGH", 4.0 if _IS_SWING else 2.0))
+
+# Minimum stop distance in ATRs. Scalp keeps the anti-stop-hunt floor; swing
+# runs tight by design (the zone itself is the invalidation).
+MIN_SL_ATR = float(os.getenv("MIN_SL_ATR", 0.60 if _IS_SWING else 1.15))
+# Extra room past the swing/zone so a wick through it doesn't tag SL.
 STRUCTURE_SL_BUFFER_ATR = float(os.getenv("STRUCTURE_SL_BUFFER_ATR", 0.25))
-# Structural swing lookback in bars on *each* TF used for the stop
-# (20 × 5m ≈ 100m; 20 × 15m ≈ 5h of bias structure).
+# Structural swing lookback in bars on *each* TF used for the structure stop.
 STRUCTURE_SWING_LOOKBACK = int(os.getenv("STRUCTURE_SWING_LOOKBACK", 20))
 
 # ==========================================================
@@ -165,13 +219,5 @@ SLIPPAGE_PCT = float(os.getenv("SLIPPAGE_PCT", 0.02))
 MAKER_FEE_RATE = float(os.getenv("MAKER_FEE_RATE", 0.0002))
 TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", 0.00055))
 
-# ==========================================================
-# Scan configuration
-# ==========================================================
-SCAN_MODE = os.getenv("SCAN_MODE", "scalp")
-
-SCALP_BIAS_TF = "15m"
-SCALP_ENTRY_TF = "5m"
-
-SWING_BIAS_TF = "4h"
-SWING_ENTRY_TF = "30m"
+# (SCAN_MODE / timeframe selection moved near the top of this file — the
+# risk-geometry defaults below depend on it.)
