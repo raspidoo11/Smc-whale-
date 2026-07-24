@@ -20,7 +20,8 @@ from trade_manager import (
     reset_daily_pnl,
     get_open_trades,
     get_signal_hash_exists,
-    save_signal_hash
+    save_signal_hash,
+    is_symbol_in_cooldown,
 )
 from trade_monitor import monitor_trades
 from xgboost_trainer import train_model_incremental
@@ -79,8 +80,8 @@ def count_active_trades():
 
 
 async def get_fresh_symbols(limit=30):
-    """Get symbols excluding those we already have open trades or resting
-    limit orders on."""
+    """Get symbols excluding those with open trades / resting limit orders /
+    an active post-close cooldown."""
     open_trades = get_open_trades()
     open_symbols = {
         t["symbol"] for t in open_trades
@@ -90,9 +91,21 @@ async def get_fresh_symbols(limit=30):
     # Get more symbols than needed so we can filter
     all_symbols = get_top_symbols(100)
 
-    fresh_symbols = [s for s in all_symbols if s not in open_symbols][:limit]
-    logger.info(f"📊 Fresh symbols selected: {len(fresh_symbols)} (excluded {len(open_symbols)} open/pending)")
+    fresh_symbols, cooled = [], 0
+    for s in all_symbols:
+        if s in open_symbols:
+            continue
+        if is_symbol_in_cooldown(s):
+            cooled += 1
+            continue
+        fresh_symbols.append(s)
+        if len(fresh_symbols) >= limit:
+            break
 
+    logger.info(
+        f"📊 Fresh symbols: {len(fresh_symbols)} "
+        f"(excluded {len(open_symbols)} open/pending, {cooled} in cooldown)"
+    )
     return fresh_symbols
 
 

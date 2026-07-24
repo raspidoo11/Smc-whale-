@@ -360,18 +360,17 @@ def round_price(price, market):
     return round(price, 6)
 
 
-async def activate_trailing_stop(symbol, current_price, trail_percent=0.5):
+async def activate_trailing_stop(symbol, current_price, trail_percent=0.5, trail_distance=None):
     """Let a winner run: cancel the hard take-profit and attach a trailing stop.
 
-    Two fixes over the old version:
-      1. It set a trailing stop via place_order(reduceOnly, trailingStop=...) but
-         NEVER cancelled the take-profit attached at entry — so Bybit's hard TP
-         closed the position at TP first and the trade never trailed. We now use
-         set_trading_stop with takeProfit="0" to remove the TP in the same call.
-      2. Bybit's `trailingStop` is an ABSOLUTE price distance, not a percent. The
-         old code passed "0.5" (= 0.5 quote units) which is meaningless for most
-         symbols. We convert trail_percent -> price distance = price * pct/100,
-         rounded to the symbol's tick.
+    Bybit's `trailingStop` is an ABSOLUTE price distance. The caller now passes
+    `trail_distance` in price directly (computed ATR-aware in trade_monitor so
+    small retraces don't stop the trade out). `trail_percent` remains a
+    fallback: price * pct/100 when no explicit distance is given.
+
+    Also removes the take-profit attached at entry (takeProfit="0" in the same
+    set_trading_stop call) so Bybit's hard TP can't close the position at TP
+    before the trailing stop ever engages.
     """
     if not EXECUTE_TRADES:
         logger.info(f"⏸️ EXECUTE_TRADES=false — skipping trailing stop for {symbol} (no Bybit call made)")
@@ -389,7 +388,8 @@ async def activate_trailing_stop(symbol, current_price, trail_percent=0.5):
             return None
 
         market = get_symbol_info(symbol)
-        distance = round_price(current_price * trail_percent / 100.0, market)
+        raw_distance = trail_distance if trail_distance else current_price * trail_percent / 100.0
+        distance = round_price(raw_distance, market)
         if distance <= 0:
             logger.warning(f"{sym}: computed trailing distance {distance} <= 0; skipping")
             return None
@@ -402,9 +402,10 @@ async def activate_trailing_stop(symbol, current_price, trail_percent=0.5):
             trailingStop=str(distance),
             activePrice=str(round_price(current_price, market)),
         )
+        pct = distance / current_price * 100 if current_price else 0
         logger.info(
-            f"🚀 {sym}: TP cancelled, trailing stop set at {trail_percent}% "
-            f"(distance={distance}) from {current_price}"
+            f"🚀 {sym}: TP cancelled, trailing stop set at distance={distance} "
+            f"(~{pct:.2f}% of price) from {current_price}"
         )
         return resp
 

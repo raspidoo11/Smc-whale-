@@ -28,6 +28,7 @@ from config import (
     RR_LOW,
     RR_MID,
     RR_HIGH,
+    MIN_SIGNAL_CONFIDENCE,
     ENTRY_MODE,
 )
 
@@ -876,6 +877,10 @@ def get_signal(symbol, df_15m, df_5m):
             0,
             min(final_confidence, 100)
         )
+
+        # Hard floor: never emit below MIN_SIGNAL_CONFIDENCE, whatever the
+        # adaptive/mode threshold worked out to. Quality gate the user set.
+        confidence_required = max(confidence_required, MIN_SIGNAL_CONFIDENCE)
 
         # ==========================================================
         # Logging — ONE compact line per evaluated setup. The old 25-line

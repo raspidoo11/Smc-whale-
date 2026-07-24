@@ -37,6 +37,7 @@ from config import (
     ENTRY_TF,
     BIAS_TF,
     ENTRY_TF_MINUTES,
+    TRAIL_ATR_MULT,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,18 +74,25 @@ def _simulate_limit_fill(
     return None
 
 
-def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, activation_ratio):
+def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, activation_ratio,
+                   trail_distance=None):
     """Walk future candles; return (exit_price, reason, bars_held).
 
     Mirrors live behavior: the hard TP is replaced by a trailing stop once price
     reaches `activation_ratio` of the way to TP (e.g. 97%), so a winner can run
-    PAST tp instead of being capped there.
+    PAST tp instead of being capped there. The trail distance is either an
+    absolute price (`trail_distance`, ATR-aware — what live uses now) or, when
+    None, `trail_pct` percent of the anchor (legacy).
     """
     # Price at which the trailing stop takes over (just short of TP).
     if direction == "LONG":
         activation = entry + (tp - entry) * activation_ratio
     else:
         activation = entry - (entry - tp) * activation_ratio
+
+    def _stop_from(anchor):
+        d = trail_distance if trail_distance is not None else anchor * trail_pct / 100
+        return anchor - d if direction == "LONG" else anchor + d
 
     trailing = False
     anchor = None
@@ -108,14 +116,12 @@ def _simulate_exit(direction, entry, sl, tp, highs, lows, closes, trail_pct, act
         if trailing:
             if direction == "LONG":
                 anchor = max(anchor, h)
-                stop = anchor * (1 - trail_pct / 100)
-                if l <= stop:
-                    return stop, "Trailing Stop Hit", k + 1
+                if l <= _stop_from(anchor):
+                    return _stop_from(anchor), "Trailing Stop Hit", k + 1
             else:
                 anchor = min(anchor, l)
-                stop = anchor * (1 + trail_pct / 100)
-                if h >= stop:
-                    return stop, "Trailing Stop Hit", k + 1
+                if h >= _stop_from(anchor):
+                    return _stop_from(anchor), "Trailing Stop Hit", k + 1
 
     # Never exited within available data -> close at final candle's close.
     return float(closes[-1]) if n else None, "Open at data end", n
@@ -216,6 +222,11 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False, context_provider=None):
                 continue
             qty = risk_usd / per_unit
 
+            # ATR-aware trail distance (wider of ATR band / % floor), matching
+            # trade_monitor.trail_distance_price so backtests reflect live.
+            atr = float(signal.get("atr") or 0)
+            trail_dist = max(entry * TRAIL_PERCENT / 100.0, atr * TRAIL_ATR_MULT) or None
+
             # Exit walk starts at the fill bar itself (a limit fill and an SL
             # breach can share a candle — conservatively, SL wins).
             start = i + 1 + fill_offset
@@ -223,6 +234,7 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False, context_provider=None):
                 direction, entry, sl, tp,
                 highs[start:], lows[start:], closes[start:],
                 TRAIL_PERCENT, TRAIL_ACTIVATION_RATIO,
+                trail_distance=trail_dist,
             )
             if exit_price is None:
                 break

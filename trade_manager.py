@@ -137,11 +137,13 @@ def close_trade(symbol, exit_price, result, extra_fields=None):
         save_trade_history(history)
         logger.info(f"Trade closed: {symbol} ({result})")
 
-        # NOTE: this used to check `result == "SL"`, but result is always
-        # "WIN" or "LOSS" (see paper_trader.py's close_paper_trade_with_fees),
-        # so that cooldown never actually fired. Fixed to match real values.
-        if result == "LOSS":
-            set_cooldown(symbol, minutes=60)
+        # Post-close cooldown on the pair — ANY close (win OR loss), not just
+        # losses. Blocks re-firing the same symbol right after an exit. The
+        # previous loss-only cooldown was also never enforced anywhere (dead
+        # code); get_fresh_symbols now excludes cooled-down pairs.
+        from config import POST_CLOSE_COOLDOWN_MINUTES
+        if POST_CLOSE_COOLDOWN_MINUTES > 0:
+            set_cooldown(symbol, minutes=POST_CLOSE_COOLDOWN_MINUTES)
 
     save_open_trades(remaining)
     return closed_trade

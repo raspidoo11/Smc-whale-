@@ -95,7 +95,10 @@ Copy `.env.example` → `.env`. Environment variables:
 | `MAX_ALT_POSITIONS` | `8` | Max concurrent non-major (alt) positions |
 | `MIN_EXPECTED_R` | `0.0` | Min model-expected R to accept a trade (AI mode) |
 | `TRAIL_ACTIVATION_RATIO` | `0.97` | Fraction of entry→TP at which TP is cancelled and trailing arms |
-| `TRAIL_PERCENT` | `0.5` | Trailing distance as % of price |
+| `TRAIL_PERCENT` | `0.3` | Trailing distance — percent-of-price floor |
+| `TRAIL_ATR_MULT` | `1.5` | Trailing distance in ATRs; trail = wider of this and TRAIL_PERCENT (0 = percent only) |
+| `MIN_SIGNAL_CONFIDENCE` | scalp `65` / swing `0` | Hard floor — no signal emitted below this final confidence |
+| `POST_CLOSE_COOLDOWN_MINUTES` | scalp `120` / swing `0` | Block re-entry on a pair for this long after ANY close |
 | `ENTRY_MODE` | `limit` | `limit` = prediction zones (OB / FVG / ATR pullback); `market` = chase close |
 | `LIMIT_TTL_MINUTES` | `180` | How long a resting prediction may wait (desk-style) |
 | `INVALIDATE_PENDING_ON_STRUCTURE` | `true` | Cancel unfilled limits if structure breaks before fill |

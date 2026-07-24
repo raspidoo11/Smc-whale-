@@ -20,6 +20,7 @@ from alerts import (
 )
 from config import (
     TRAIL_PERCENT,
+    TRAIL_ATR_MULT,
     TRAIL_ACTIVATION_RATIO,
     LIMIT_TTL_MINUTES,
     INVALIDATE_PENDING_ON_STRUCTURE,
@@ -27,6 +28,21 @@ from config import (
 
 logger = logging.getLogger(__name__)
 exchange = get_exchange()
+
+
+def trail_distance_price(trade, ref_price):
+    """Trailing distance in PRICE, volatility-aware: the WIDER of the percent
+    floor (TRAIL_PERCENT% of price) and an ATR band (TRAIL_ATR_MULT × ATR).
+
+    A flat 0.3% trail sat inside normal candle noise, so every micro-retrace
+    stopped a winner out before it could run. Scaling the trail to ATR gives
+    the trade room proportional to how much the instrument actually wiggles.
+    Falls back to the percent floor when a trade has no stored ATR."""
+    ref = float(ref_price or 0)
+    pct_dist = ref * TRAIL_PERCENT / 100.0
+    atr = float(trade.get("atr") or 0)
+    atr_dist = atr * TRAIL_ATR_MULT if TRAIL_ATR_MULT > 0 else 0.0
+    return max(pct_dist, atr_dist)
 
 # Live-only: how long to wait before retrying a failed trailing-stop
 # activation, and how many attempts before force-closing so a trade can't get
@@ -98,16 +114,20 @@ async def _handle_paper_trailing(trade, symbol, direction, current_price, open_t
     anchor ratchets with favorable price and the trade closes when price
     retraces TRAIL_PERCENT from the best level — the same behavior the live
     Bybit trailing stop provides. Returns True if the trade was closed."""
-    trail = float(trade.get("trail_percent", TRAIL_PERCENT))
     anchor = float(trade.get("trail_anchor", current_price))
+    # ATR-aware trailing distance measured from the running anchor (peak/
+    # trough) so small retraces don't stop the trade out.
+    dist = trail_distance_price(trade, anchor)
 
     if direction == "LONG":
         anchor = max(anchor, current_price)
-        stop_price = anchor * (1 - trail / 100)
+        dist = trail_distance_price(trade, anchor)
+        stop_price = anchor - dist
         breached = current_price <= stop_price
     else:
         anchor = min(anchor, current_price)
-        stop_price = anchor * (1 + trail / 100)
+        dist = trail_distance_price(trade, anchor)
+        stop_price = anchor + dist
         breached = current_price >= stop_price
 
     if breached:
@@ -346,15 +366,19 @@ async def monitor_trades():
                     continue
 
                 if near_tp:
+                    # ATR-aware trail distance (wider of ATR band / % floor).
+                    dist = trail_distance_price(trade, current_price)
+                    trail_pct_eff = dist / current_price * 100 if current_price else TRAIL_PERCENT
+
                     # ---- Paper: arm the simulated trailing stop ----
                     if not EXECUTE_TRADES:
                         trade["trailing_stop_active"] = True
                         trade["trail_anchor"] = current_price
-                        trade["trail_percent"] = TRAIL_PERCENT
                         trade["trailing_stop_activated_at"] = datetime.now(timezone.utc).isoformat()
                         trades_changed = True
-                        logger.info(f"🚀 {symbol} near TP ({TRAIL_ACTIVATION_RATIO:.0%}) — arming paper trailing stop")
-                        await send_alert(format_trailing_alert(trade, current_price, TRAIL_PERCENT))
+                        logger.info(f"🚀 {symbol} near TP ({TRAIL_ACTIVATION_RATIO:.0%}) — arming paper trailing stop "
+                                    f"(~{trail_pct_eff:.2f}% / {dist:.6f})")
+                        await send_alert(format_trailing_alert(trade, current_price, round(trail_pct_eff, 2)))
                         continue
 
                     # ---- Live: cancel TP + activate the Bybit trailing stop ----
@@ -375,11 +399,11 @@ async def monitor_trades():
                         )
                         continue
 
-                    logger.info(f"🚀 Activating trailing stop on {symbol} (near TP)")
+                    logger.info(f"🚀 Activating trailing stop on {symbol} (near TP, ~{trail_pct_eff:.2f}%)")
                     result = await activate_trailing_stop(
                         symbol=symbol,
                         current_price=current_price,
-                        trail_percent=TRAIL_PERCENT,
+                        trail_distance=dist,
                     )
 
                     trade["trailing_stop_attempts"] = attempts + 1
@@ -389,7 +413,7 @@ async def monitor_trades():
                     if result:
                         trade["trailing_stop_active"] = True
                         trade["trailing_stop_activated_at"] = datetime.now(timezone.utc).isoformat()
-                        await send_alert(format_trailing_alert(trade, current_price, TRAIL_PERCENT))
+                        await send_alert(format_trailing_alert(trade, current_price, round(trail_pct_eff, 2)))
                     else:
                         logger.error(
                             f"Failed to activate trailing stop for {symbol} "

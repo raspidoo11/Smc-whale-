@@ -105,6 +105,19 @@ WIN_LABEL_MIN_R = float(os.getenv("WIN_LABEL_MIN_R", 0.5))
 AI_MAX_WEIGHT = float(os.getenv("AI_MAX_WEIGHT", 0.40))
 AI_WEIGHT_FULL_AT = int(os.getenv("AI_WEIGHT_FULL_AT", 150))
 
+# Hard confidence floor: no signal is emitted below this final confidence,
+# regardless of the adaptive/mode threshold. Scalp defaults to 65 (quality
+# over quantity); swing leaves it off (its own dynamics gate frequency).
+# Env-overridable per bot.
+MIN_SIGNAL_CONFIDENCE = float(os.getenv("MIN_SIGNAL_CONFIDENCE", 65 if not _IS_SWING else 0))
+
+# After ANY close (win OR loss) on a pair, block re-entry on that pair for this
+# many minutes — stops the bot re-firing the same symbol right after an exit
+# (revenge/whipsaw). Scalp: 120 min. Swing: off (trades are already sparse).
+POST_CLOSE_COOLDOWN_MINUTES = float(
+    os.getenv("POST_CLOSE_COOLDOWN_MINUTES", 120 if not _IS_SWING else 0)
+)
+
 # ==========================================================
 # Trailing stop — let winners run instead of capping at TP
 # ==========================================================
@@ -115,8 +128,13 @@ AI_WEIGHT_FULL_AT = int(os.getenv("AI_WEIGHT_FULL_AT", 150))
 # both entry modes and both fee models tested. Re-run optimize.py periodically —
 # these are regime-dependent.
 TRAIL_ACTIVATION_RATIO = float(os.getenv("TRAIL_ACTIVATION_RATIO", 0.90))
-# Trailing distance as a percent of price (0.3 = trail 0.3% behind the peak).
+# Trailing distance, PERCENT-of-price floor (0.3 = trail at least 0.3% behind).
 TRAIL_PERCENT = float(os.getenv("TRAIL_PERCENT", 0.3))
+# Trailing distance in ATRs (0 = percent only). A flat 0.3% trail sat inside
+# normal candle noise and got stopped on every micro-retrace before a winner
+# could run. The trail is now the WIDER of (TRAIL_PERCENT% of price) and
+# (TRAIL_ATR_MULT × ATR) — volatility-proportional room so pullbacks breathe.
+TRAIL_ATR_MULT = float(os.getenv("TRAIL_ATR_MULT", 1.5))
 
 # ==========================================================
 # Entry execution — prediction limits vs chase-at-market
