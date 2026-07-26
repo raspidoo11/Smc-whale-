@@ -11,9 +11,10 @@ from lightgbm import LGBMClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.metrics import roc_auc_score, log_loss, brier_score_loss
-from sklearn.model_selection import train_test_split
 from trade_manager import get_trade_history
-from config import MODELS_DIR, WIN_LABEL_MIN_R
+from config import (
+    MODELS_DIR, WIN_LABEL_MIN_R, ENTRY_TF_MINUTES, USE_TRIPLE_BARRIER,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +54,66 @@ DIAGNOSTICS_EVERY_N_TRADES = 100
 OVERFIT_GAP_ALERT_THRESHOLD = 0.20  # train AUC - holdout AUC beyond this gets logged as a warning
 
 DROP_FEATURES = ["fvg_x_sweep"]  # duplicate of sweep_x_fvg
+
+# Purge/embargo window for the chronological split: a training trade is only
+# usable if its outcome had already resolved this long before the first holdout
+# trade opened. Matches pretrain.py's default so offline CV and live retraining
+# validate on the same terms.
+EMBARGO_HOURS = float(os.getenv("TRAIN_EMBARGO_HOURS", 24))
+MIN_TRAIN_ROWS = 15
+
+# Promotion gate operating point. The old gate compared holdout AUC, which
+# ranks the whole probability range — but the bot only ever acts on setups
+# above a confidence bar, so what matters is whether the trades it WOULD take
+# are profitable. These define "would take" for scoring purposes.
+PROMOTION_PROB_THRESHOLD = float(os.getenv("PROMOTION_PROB_THRESHOLD", 0.5))
+# Challenger must beat the champion's expected R by this much to take over —
+# stops churn on noise when both are effectively equivalent.
+PROMOTION_EV_MARGIN = float(os.getenv("PROMOTION_EV_MARGIN", 0.02))
+
+# Columns that ride along in the feature frame as metadata and must NEVER
+# reach the model. _entry_ms/_exit_ms especially: they are numeric, so
+# select_dtypes(number) would happily train on raw epoch timestamps and learn
+# "trades in this date range won" — a pure lookahead artifact.
+META_COLS = (
+    "target", "realized_r", "label_kind", "sample_source", "_entry_ms", "_exit_ms",
+)
+
+
+def _to_ms(value):
+    """ISO-8601 string / datetime -> epoch ms. None if absent or unparseable."""
+    if value in (None, ""):
+        return None
+    try:
+        ts = pd.to_datetime(value, utc=True)
+    except (ValueError, TypeError):
+        return None
+    return None if pd.isna(ts) else int(ts.timestamp() * 1000)
+
+
+def trade_entry_ms(trade):
+    return _to_ms(trade.get("entry_time"))
+
+
+def trade_exit_ms(trade):
+    """End of a trade's label horizon.
+
+    Prefers a recorded exit_time. Falls back to entry + bars_held bars (the
+    backtester records how many bars a trade was held but no exit clock), then
+    to the entry instant itself for legacy rows that predate both.
+    """
+    exit_ms = _to_ms(trade.get("exit_time"))
+    if exit_ms is not None:
+        return exit_ms
+
+    entry_ms = trade_entry_ms(trade)
+    if entry_ms is None:
+        return None
+    try:
+        bars = int(trade.get("bars_held") or 0)
+    except (TypeError, ValueError):
+        bars = 0
+    return entry_ms + max(bars, 1) * ENTRY_TF_MINUTES * 60 * 1000
 
 
 # ---------------------------------------------------------------------------
@@ -291,6 +352,40 @@ def calculate_realized_r(trade):
     return round(realized_distance / risk_distance, 4)
 
 
+def resolve_label_r(trade):
+    """R-multiple used for labeling, and which source it came from.
+
+    Prefers the triple-barrier R (`tb_realized_r`, written by the backtester —
+    see labeling.py) because it depends only on the forward price path under a
+    fixed exit policy. Falls back to the managed exit for rows recorded before
+    triple-barrier labeling existed, so old corpora remain trainable.
+
+    Returns (r, label_kind) where label_kind is "triple_barrier" or "realized".
+    """
+    if USE_TRIPLE_BARRIER:
+        tb_r = trade.get("tb_realized_r")
+        if tb_r is not None:
+            try:
+                return round(float(tb_r), 4), "triple_barrier"
+            except (TypeError, ValueError):
+                pass
+    return calculate_realized_r(trade), "realized"
+
+
+def label_horizon_ms(trade):
+    """When this row's LABEL resolved — the timestamp purging must respect.
+
+    For a triple-barrier row that is the barrier touch (`tb_exit_time`), which
+    can land later than the managed trade's own exit. Purging on the exit
+    instead would let a still-unresolved label leak across the split boundary.
+    """
+    if USE_TRIPLE_BARRIER:
+        tb_exit = _to_ms(trade.get("tb_exit_time"))
+        if tb_exit is not None:
+            return tb_exit
+    return trade_exit_ms(trade)
+
+
 # ---------------------------------------------------------------------------
 # Persistence helpers
 # ---------------------------------------------------------------------------
@@ -374,24 +469,48 @@ def build_feature_frame(history):
         context = calculate_historical_context(history[:i])
         regime = trade.get("market_regime", "ranging")
         row = extract_pro_features_from_trade(trade, context, regime=regime)
-        # Label engineering: positive class = "realized at least WIN_LABEL_MIN_R"
-        # (default 0.5R), NOT "pnl > 0". A +0.05R scratch and a +2.5R runner
-        # are different outcomes; labeling both WIN taught the model to
-        # predict fee-noise. Balance/streak accounting still uses status.
-        r = calculate_realized_r(trade)
+
+        # Label engineering. Positive class = "reached at least WIN_LABEL_MIN_R"
+        # (default 0.5R), NOT "pnl > 0" — a +0.05R scratch and a +2.5R runner are
+        # different outcomes, and labeling both WIN taught the model to predict
+        # fee noise. Balance/streak accounting still uses status.
+        #
+        # The R itself prefers the TRIPLE-BARRIER outcome when the row carries
+        # one (see labeling.py): that R is a property of the forward price path
+        # under a fixed exit policy, whereas calculate_realized_r reflects
+        # whatever trailing/time-stop logic happened to be deployed when the
+        # trade ran. Rows predating triple-barrier labeling fall back to the
+        # realized exit so old corpora stay trainable.
+        r, label_kind = resolve_label_r(trade)
         row["target"] = 1 if r >= WIN_LABEL_MIN_R else 0
         row["realized_r"] = r
-        # Metadata, not a feature: string column, so prepare_X_y's
-        # select_dtypes(number) drops it from X automatically. Used only to
-        # down-weight simulated rows during fitting.
+        row["label_kind"] = label_kind
+
+        # Metadata, not features — see META_COLS, which prepare_X_y drops
+        # explicitly. sample_source down-weights simulated rows during fitting;
+        # the _ms timestamps drive the purged chronological split.
         row["sample_source"] = trade.get("source", "live")
+        row["_entry_ms"] = trade_entry_ms(trade)
+        # Purge on the LABEL horizon, not the managed exit: a triple-barrier
+        # label stays unresolved until its barrier is touched, which can be
+        # later than the trade's own exit.
+        row["_exit_ms"] = label_horizon_ms(trade)
         rows.append(row)
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows)
+    if not df.empty and "label_kind" in df.columns:
+        counts = df["label_kind"].value_counts().to_dict()
+        logger.info(f"   Label source: {counts}")
+    return df
 
 
 def prepare_X_y(df, feature_history=None, drop_decayed=True, target_col="target"):
-    drop_cols = [c for c in ("target", "realized_r") if c in df.columns]
+    # Drop every meta column, target included — y is taken from `df` below, so
+    # the label must not survive in X. (An earlier version excluded target_col
+    # from this list, which left the label sitting in the feature matrix.)
+    drop_cols = [c for c in META_COLS if c in df.columns]
+    if target_col not in df.columns:
+        raise KeyError(f"prepare_X_y: target column {target_col!r} not in frame")
     X = df.drop(columns=drop_cols)
     X = X.select_dtypes(include=[np.number]).fillna(0)
 
@@ -417,51 +536,91 @@ def make_sample_weights(n, half_life=60):
     return 0.5 ** (ages / half_life)
 
 
-def split_train_holdout(df, holdout_size):
+def split_train_holdout(df, holdout_size, embargo_ms=None):
     """
-    Build a train/holdout split for the classifier.
+    Chronological, purged, embargoed train/holdout split.
 
-    Historically this was a strict chronological split (train = everything
-    except the last `holdout_size` rows). That's the "honest" walk-forward
-    approach, but it has a failure mode: if the *training* slice happens to
-    land on a streak (e.g. the bot's first 20+ closed trades were all WINs,
-    or all LOSSes), `y_train.nunique() < 2` and training silently skips
-    forever — even once the full window has both classes — because the
-    fixed training slice never changes composition until the streak ages
-    out of the rolling window.
+    This used to be `train_test_split(..., stratify=target, shuffle=True)`.
+    Shuffling a time series put future trades in the training set and past
+    trades in the holdout, so the "honest holdout" metrics — and the
+    train-vs-holdout overfit gap check — were scoring a model on a period it
+    had already been trained across. Every promotion decision made under that
+    split was measuring leakage, not skill.
 
-    Fix: try a class-stratified split first, so both splits are guaranteed
-    to contain both classes whenever the full window does. We keep each
-    split sorted back into chronological order afterward so the recency
-    sample-weighting in `make_sample_weights` still behaves sensibly.
-    Falls back to the old chronological split if stratification isn't
-    possible (e.g. a class has fewer members than needed for the split).
+    Shuffling was introduced to fix a real bug, though: with a strict
+    chronological split, an early all-WIN or all-LOSS streak leaves one side
+    single-class, and training then silently skips FOREVER, because the fixed
+    slice's composition can't change until the streak ages out of the rolling
+    window. This version fixes that without breaking chronology — it GROWS the
+    holdout backwards until both sides carry both classes, and gives up
+    honestly (returns None) rather than shuffling when no valid split exists.
+
+    Purge/embargo: a training trade is kept only if its outcome had already
+    resolved `embargo_ms` before the first holdout trade opened. Overlapping
+    trades otherwise leak their outcome across the boundary — the same
+    correction pretrain.py applies offline.
+
+    Returns (train_df, test_df), or (None, None) if the window cannot be split
+    honestly; the caller must skip the retrain in that case.
     """
-    try:
-        train_df, test_df = train_test_split(
-            df,
-            test_size=holdout_size,
-            stratify=df["target"],
-            shuffle=True,
-            random_state=42,
-        )
-        train_df = train_df.sort_index()
-        test_df = test_df.sort_index()
+    if embargo_ms is None:
+        embargo_ms = int(EMBARGO_HOURS * 3600 * 1000)
+
+    n = len(df)
+    entry_ms = df["_entry_ms"].tolist() if "_entry_ms" in df.columns else [None] * n
+    exit_ms = df["_exit_ms"].tolist() if "_exit_ms" in df.columns else [None] * n
+
+    # Grow the holdout backwards from the requested size until both sides are
+    # trainable/scoreable. Capped at half the window so training never starves.
+    max_holdout = max(holdout_size, n // 2)
+
+    for size in range(holdout_size, max_holdout + 1):
+        split_at = n - size
+        if split_at < MIN_TRAIN_ROWS:
+            break
+
+        test_df = df.iloc[split_at:]
+        if test_df["target"].nunique() < 2:
+            continue  # can't compute a holdout metric on one class
+
+        test_start = entry_ms[split_at]
+        if test_start is None:
+            # Legacy rows with no timestamps: chronology is still respected,
+            # but overlap can't be measured, so no purge is possible.
+            keep = list(range(split_at))
+            purged = 0
+        else:
+            cutoff = test_start - embargo_ms
+            keep = [
+                i for i in range(split_at)
+                if exit_ms[i] is None or exit_ms[i] <= cutoff
+            ]
+            purged = split_at - len(keep)
+
+        train_df = df.iloc[keep]
+        if len(train_df) < MIN_TRAIN_ROWS or train_df["target"].nunique() < 2:
+            continue
+
+        grown = " (grown for class balance)" if size != holdout_size else ""
         logger.info(
-            f"   Split method: stratified (train={len(train_df)}, holdout={len(test_df)})"
+            f"   Split method: chronological + purged{grown} "
+            f"(train={len(train_df)}, holdout={len(test_df)}, "
+            f"purged={purged}, embargo={EMBARGO_HOURS}h)"
         )
+        if test_start is None:
+            logger.warning(
+                "   ⚠️  Holdout trades carry no entry_time — purge skipped for this "
+                "run. Rows written before timestamping was added lack it; this "
+                "resolves itself as new trades accumulate."
+            )
         return train_df, test_df
-    except ValueError as e:
-        logger.warning(
-            f"Stratified split failed ({e}) — falling back to chronological split. "
-            f"This can happen if one class has very few trades."
-        )
-        train_df = df.iloc[:-holdout_size]
-        test_df = df.iloc[-holdout_size:]
-        logger.info(
-            f"   Split method: chronological fallback (train={len(train_df)}, holdout={len(test_df)})"
-        )
-        return train_df, test_df
+
+    logger.info(
+        f"⏳ No honest chronological split available yet "
+        f"(n={n}, need >={MIN_TRAIN_ROWS} train rows with both classes on each "
+        f"side) — skipping this retrain rather than shuffling time."
+    )
+    return None, None
 
 
 # ---------------------------------------------------------------------------
@@ -488,10 +647,26 @@ class EnsembleClassifier:
         return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 
-def evaluate_model(model, X_test, y_test):
+def evaluate_model(model, X_test, y_test, r_test=None, threshold=None):
+    """Score a model on a holdout.
+
+    AUC/log-loss/Brier are still reported, but the promotion-relevant numbers
+    are `precision`, `precision_lift` and `ev_r`. AUC measures ranking across
+    the entire probability range; the bot only ever takes setups above a
+    confidence bar, so what decides profit is whether the slice it WOULD trade
+    wins often enough and by a big enough R multiple. A model can rank well on
+    average and still lose money on the trades it actually picks.
+
+    `ev_r` — mean realized R over the selected trades — is the money metric:
+    it prices win rate and payoff together, so a 40%-win / 3R model beats a
+    60%-win / 0.5R one, which no precision or AUC figure would tell you.
+    """
     if len(X_test) == 0 or y_test.nunique() < 2:
         return None
+
+    threshold = PROMOTION_PROB_THRESHOLD if threshold is None else threshold
     probs = model.predict_proba(X_test)[:, 1]
+
     try:
         auc = roc_auc_score(y_test, probs)
     except ValueError:
@@ -501,7 +676,92 @@ def evaluate_model(model, X_test, y_test):
     except ValueError:
         ll = None
     brier = brier_score_loss(y_test, probs)
-    return {"auc": auc, "log_loss": ll, "brier": brier, "n_test": len(y_test)}
+
+    base_rate = float(y_test.mean())
+    selected = probs >= threshold
+    n_selected = int(selected.sum())
+
+    if n_selected:
+        y_arr = np.asarray(y_test)
+        precision = float(y_arr[selected].mean())
+        precision_lift = precision - base_rate
+        if r_test is not None:
+            ev_r = float(np.asarray(r_test, dtype=float)[selected].mean())
+        else:
+            ev_r = None
+    else:
+        # Nothing cleared the bar: the model would simply not trade. That is
+        # not a failure, but it is also not evidence of skill — leave the
+        # decision metrics undefined so the gate falls through to AUC.
+        precision = precision_lift = ev_r = None
+
+    return {
+        "auc": auc,
+        "log_loss": ll,
+        "brier": brier,
+        "n_test": len(y_test),
+        "threshold": threshold,
+        "n_selected": n_selected,
+        "base_rate": round(base_rate, 4),
+        "precision": None if precision is None else round(precision, 4),
+        "precision_lift": None if precision_lift is None else round(precision_lift, 4),
+        "ev_r": None if ev_r is None else round(ev_r, 4),
+    }
+
+
+def promotion_decision(challenger_metrics, champion_metrics):
+    """Decide whether the challenger replaces the champion.
+
+    Priority: expected R on the traded slice, then precision lift over the
+    holdout base rate, then AUC as a last resort. Unlike the old gate, a
+    challenger must clear an ABSOLUTE bar even when there is no champion —
+    that path previously auto-promoted anything, which is how a model with
+    0.357 holdout AUC (worse than a coin flip) reached production.
+    """
+    if not challenger_metrics:
+        return False, "challenger not evaluable on holdout (single-class); keeping champion"
+
+    chal_ev = challenger_metrics.get("ev_r")
+    chal_lift = challenger_metrics.get("precision_lift")
+    chal_auc = challenger_metrics.get("auc")
+
+    # --- Absolute sanity bar: would this model make money on its own picks? ---
+    if chal_ev is not None:
+        if chal_ev <= 0:
+            return False, f"challenger expected R {chal_ev:+.3f} <= 0 on its own selections — rejected"
+    elif chal_lift is not None:
+        if chal_lift <= 0:
+            return False, f"challenger precision {challenger_metrics['precision']:.3f} <= base rate {challenger_metrics['base_rate']:.3f} — rejected"
+    elif chal_auc is not None:
+        if chal_auc <= 0.5:
+            return False, f"challenger AUC {chal_auc:.3f} <= 0.5 (no better than chance) — rejected"
+    else:
+        return False, "challenger produced no usable holdout metric — rejected"
+
+    if not champion_metrics:
+        detail = f"expected R {chal_ev:+.3f}" if chal_ev is not None else (
+            f"precision lift {chal_lift:+.3f}" if chal_lift is not None else f"AUC {chal_auc:.3f}"
+        )
+        return True, f"no existing champion and challenger clears the absolute bar ({detail})"
+
+    # --- Head-to-head on the best metric both models share ---
+    champ_ev = champion_metrics.get("ev_r")
+    if chal_ev is not None and champ_ev is not None:
+        if chal_ev >= champ_ev + PROMOTION_EV_MARGIN:
+            return True, f"challenger expected R {chal_ev:+.3f} beats champion {champ_ev:+.3f} (margin {PROMOTION_EV_MARGIN})"
+        return False, f"challenger expected R {chal_ev:+.3f} does not beat champion {champ_ev:+.3f} by {PROMOTION_EV_MARGIN}"
+
+    champ_lift = champion_metrics.get("precision_lift")
+    if chal_lift is not None and champ_lift is not None:
+        if chal_lift >= champ_lift:
+            return True, f"challenger precision lift {chal_lift:+.3f} >= champion {champ_lift:+.3f}"
+        return False, f"challenger precision lift {chal_lift:+.3f} < champion {champ_lift:+.3f}"
+
+    champ_auc = champion_metrics.get("auc") or 0
+    chal_auc = chal_auc or 0
+    if chal_auc >= champ_auc - 0.01:
+        return True, f"challenger AUC {chal_auc:.3f} >= champion AUC {champ_auc:.3f} (-0.01 margin, EV unavailable)"
+    return False, f"challenger AUC {chal_auc:.3f} < champion AUC {champ_auc:.3f}, keeping champion"
 
 
 def fit_candidate_model(X_train, y_train, use_ensemble=True, source_weights=None,
@@ -733,10 +993,12 @@ def train_model_incremental(force_retrain=False):
     champion/challenger promotion + expected-R regression + self-diagnostics
     + overfit detection + full metadata persistence.
 
-    Phase 16 fix: stratified train/holdout split (see split_train_holdout)
-    so an early WIN or LOSS streak can no longer permanently starve training
-    of both classes. Also adds explicit "is training actually running /
-    did the files really get written" logging throughout.
+    Phase 17 fix: the train/holdout split is chronological, purged and
+    embargoed (see split_train_holdout) instead of shuffled+stratified, and
+    promotion is decided on expected R / precision lift over the holdout base
+    rate rather than AUC (see promotion_decision). Under the old shuffled
+    split, holdout metrics scored a model on data it had trained across, so
+    both the promotion gate and the overfit-gap check were measuring leakage.
     """
     history = get_trade_history()
     logger.info(f"🚀 Retrain: {len(history)} history rows")
@@ -772,6 +1034,10 @@ def train_model_incremental(force_retrain=False):
 
     holdout_size = min(MIN_HOLDOUT_SIZE, max(5, len(df) // 5))
     train_df, test_df = split_train_holdout(df, holdout_size)
+    if train_df is None:
+        # split_train_holdout already logged why. Skipping is the honest
+        # outcome — the previous code shuffled time to force a split through.
+        return None
 
     feature_history = load_feature_history()
     use_ensemble = len(train_df) >= MIN_TRADES_FOR_ENSEMBLE
@@ -783,8 +1049,8 @@ def train_model_incremental(force_retrain=False):
     X_test = X_test.reindex(columns=X_train.columns, fill_value=0)
 
     if y_train.nunique() < 2:
-        # Should be rare now that split_train_holdout stratifies, but keep
-        # as a final safety net (e.g. a class with fewer members than holdout_size).
+        # split_train_holdout already guarantees both classes on both sides;
+        # kept as a final safety net in case column dropping changes the frame.
         win_ct = int((y_train == 1).sum())
         loss_ct = int((y_train == 0).sum())
         logger.info(
@@ -802,11 +1068,18 @@ def train_model_incremental(force_retrain=False):
     challenger, challenger_raw_models, model_type = fit_candidate_model(
         X_train, y_train, use_ensemble=use_ensemble, source_weights=_source_mults(train_df)
     )
-    challenger_metrics = evaluate_model(challenger, X_test, y_test)
+    # realized_r on the holdout lets evaluate_model price expected value, not
+    # just hit rate — see promotion_decision.
+    r_test = test_df["realized_r"] if "realized_r" in test_df.columns else None
+    r_train = train_df["realized_r"] if "realized_r" in train_df.columns else None
+
+    challenger_metrics = evaluate_model(challenger, X_test, y_test, r_test=r_test)
     logger.info(f"   Challenger holdout metrics: {challenger_metrics}")
 
-    # Overfit detection (spec item 13): compare train-set AUC to honest holdout AUC.
-    train_metrics = evaluate_model(challenger, X_train, y_train)
+    # Overfit detection (spec item 13): compare train-set AUC to honest holdout
+    # AUC. This check only became meaningful once the split stopped shuffling —
+    # with an interleaved holdout the gap was structurally near zero.
+    train_metrics = evaluate_model(challenger, X_train, y_train, r_test=r_train)
     if train_metrics and challenger_metrics and train_metrics.get("auc") and challenger_metrics.get("auc"):
         gap = train_metrics["auc"] - challenger_metrics["auc"]
         if gap > OVERFIT_GAP_ALERT_THRESHOLD:
@@ -847,33 +1120,14 @@ def train_model_incremental(force_retrain=False):
             champion = joblib.load(MODEL_PATH)
             champion_features = joblib.load(FEATURE_PATH)
             X_test_champ = X_test.reindex(columns=champion_features, fill_value=0)
-            champion_metrics = evaluate_model(champion, X_test_champ, y_test)
+            champion_metrics = evaluate_model(champion, X_test_champ, y_test, r_test=r_test)
             logger.info(f"   Existing champion loaded from {MODEL_PATH}, holdout metrics: {champion_metrics}")
         except Exception as e:
             logger.warning(f"Could not evaluate current champion: {e}")
     else:
         logger.info(f"   No existing champion found at {MODEL_PATH} (or force_retrain=True)")
 
-    promote = True
-    reason = "no existing champion"
-
-    if champion_metrics:
-        if not challenger_metrics:
-            # We couldn't score the challenger on the holdout (e.g. single-class
-            # holdout). Never replace a validated champion with an unvalidated
-            # challenger — previously `promote` stayed True here and the
-            # challenger was promoted without any comparison.
-            promote = False
-            reason = "challenger not evaluable on holdout (single-class); keeping champion"
-        else:
-            champ_auc = champion_metrics.get("auc") or 0
-            chal_auc = challenger_metrics.get("auc") or 0
-            if chal_auc >= champ_auc - 0.01:
-                promote = True
-                reason = f"challenger AUC {chal_auc:.3f} >= champion AUC {champ_auc:.3f} (-0.01 margin)"
-            else:
-                promote = False
-                reason = f"challenger AUC {chal_auc:.3f} < champion AUC {champ_auc:.3f}, keeping champion"
+    promote, reason = promotion_decision(challenger_metrics, champion_metrics)
 
     if promote:
         _dump_and_verify(final_model, MODEL_PATH, "PROMOTED model")
@@ -913,10 +1167,20 @@ def train_model_incremental(force_retrain=False):
                 f"(W{win_count}/L{loss_count}, {win_rate:.0%}) | "
                 f"mix {n_real} real + {n_backtest} backtest @{BACKTEST_SAMPLE_WEIGHT}x")
     if challenger_metrics:
-        auc = challenger_metrics.get("auc")
-        brier = challenger_metrics.get("brier")
-        logger.info(f"   Holdout: AUC {auc if auc is None else f'{auc:.3f}'} | "
-                    f"Brier {brier if brier is None else f'{brier:.3f}'}")
+        def _fmt(key, spec=".3f"):
+            v = challenger_metrics.get(key)
+            return "n/a" if v is None else format(v, spec)
+
+        # Decision metrics first, AUC/Brier after — the order reflects what the
+        # promotion gate actually weighs.
+        logger.info(
+            f"   Holdout: expected R {_fmt('ev_r', '+.3f')} | "
+            f"precision {_fmt('precision')} vs base {_fmt('base_rate')} "
+            f"(lift {_fmt('precision_lift', '+.3f')}) | "
+            f"took {challenger_metrics.get('n_selected')}/{challenger_metrics.get('n_test')} "
+            f"@p>={challenger_metrics.get('threshold')}"
+        )
+        logger.info(f"   Holdout (ranking/calibration): AUC {_fmt('auc')} | Brier {_fmt('brier')}")
 
     if current_importance:
         ranked = sorted(current_importance.items(), key=lambda kv: kv[1], reverse=True)
@@ -953,7 +1217,11 @@ def train_model_incremental(force_retrain=False):
         "n_trades_total": len(history),
         "n_trades_used": len(df),
         "rolling_window_size": ROLLING_WINDOW_SIZE,
-        "holdout_size": holdout_size,
+        "holdout_size": len(test_df),
+        "split_method": "chronological+purged+embargo",
+        "embargo_hours": EMBARGO_HOURS,
+        "promotion_metric": "expected_r -> precision_lift -> auc",
+        "promotion_threshold": PROMOTION_PROB_THRESHOLD,
         "feature_list": X_full.columns.tolist(),
         "n_features": len(X_full.columns),
         "dropped_features": list(set(DROP_FEATURES + get_decayed_features(feature_history))),

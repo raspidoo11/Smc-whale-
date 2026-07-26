@@ -70,11 +70,27 @@ def calculate_proper_qty(symbol, entry_price, sl_price, ai_prob=50, regime="rang
         if risk_per_unit == 0:
             return None
 
-        # Get base risk amount (0.5% of balance)
+        # Base risk = config.RISK_PERCENT of balance (same call the paper path
+        # uses, so paper and live size identically before the AI adjustment).
+        from config import RISK_PERCENT, MAX_RISK_PERCENT
         base_risk = get_risk_amount()
 
-        # Adjust risk using AI confidence
-        adjusted_risk = base_risk * (get_ai_risk_percent(ai_prob, recent_drawdown, regime) / 0.5)
+        # AI confidence multiplier. get_ai_risk_percent returns a PERCENT
+        # (0.2–2.5) around a 0.5 baseline, so dividing by that baseline turns it
+        # into a 0.4x–5x multiplier on base_risk.
+        ai_risk_pct = get_ai_risk_percent(ai_prob, recent_drawdown, regime)
+        adjusted_risk = base_risk * (ai_risk_pct / 0.5)
+
+        # Cap the result in percent-of-balance terms. Without this the 5x
+        # multiplier silently scaled RISK_PERCENT past any intended ceiling —
+        # at RISK_PERCENT=0.5 that is 2.5%, but at 1.0 it would have been 5%.
+        risk_cap = base_risk * (MAX_RISK_PERCENT / RISK_PERCENT)
+        if adjusted_risk > risk_cap:
+            logger.info(
+                f"Risk capped: {adjusted_risk:.2f} -> {risk_cap:.2f} USDT "
+                f"({MAX_RISK_PERCENT}% of balance ceiling)"
+            )
+            adjusted_risk = risk_cap
 
         raw_qty = adjusted_risk / risk_per_unit
 

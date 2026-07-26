@@ -100,6 +100,13 @@ def next_trade_number():
 
 def add_trade(trade):
     trades = get_open_trades()
+    # Stamp entry_time if the caller didn't. Only the backtester used to record
+    # this, so live trades had NO timestamp at all — which made purged /
+    # embargoed cross-validation structurally impossible on live history (you
+    # cannot purge overlapping labels without knowing when each trade ran).
+    # setdefault, not assignment: the backtester supplies the simulated bar time
+    # and must keep it.
+    trade.setdefault("entry_time", datetime.now(timezone.utc).isoformat())
     trades.append(trade)
     save_open_trades(trades)
     logger.info(f"Trade added: {trade['symbol']}")
@@ -126,6 +133,10 @@ def close_trade(symbol, exit_price, result, extra_fields=None):
         if trade.get("symbol") == symbol and trade.get("status") == "OPEN" and closed_trade is None:
             trade["status"] = result
             trade["exit_price"] = float(exit_price)
+            # Label horizon end. Paired with entry_time, this is what lets the
+            # trainer purge training rows whose outcome was still unresolved
+            # when a holdout trade opened.
+            trade.setdefault("exit_time", datetime.now(timezone.utc).isoformat())
             if extra_fields:
                 trade.update(extra_fields)
             closed_trade = trade
@@ -179,21 +190,22 @@ def reset_daily_pnl():
 
 # ==================== RISK MANAGEMENT ====================
 
-def risk_amount():
-    """Legacy function - kept for backward compatibility"""
-    return get_balance().get("balance", 100.0) * 0.01
+def get_risk_amount() -> float:
+    """Capital risked on one trade, in account currency.
 
-def get_risk_amount(leverage: int = 10) -> float:
+    Percent-of-balance so risk scales with the account. Both the paper and live
+    paths call this — see config.RISK_PERCENT for the history of why that
+    matters. The old `leverage` parameter was accepted and then ignored, and a
+    second `risk_amount()` helper returned a hardcoded 1% but was called by
+    nothing; both are gone.
     """
-    Dynamic risk amount.
-    Default: 0.5% of account balance (configurable via RISK_PERCENT env var)
-    """
+    from config import RISK_PERCENT
     balance = get_balance().get("balance", 100.0)
-    risk_percent = float(os.getenv("RISK_PERCENT", "0.5")) / 100
-    return round(balance * risk_percent, 2)
+    return round(balance * RISK_PERCENT / 100, 2)
 
 def get_risk_percent() -> float:
-    return float(os.getenv("RISK_PERCENT", "0.5"))
+    from config import RISK_PERCENT
+    return RISK_PERCENT
 
 # ==================== TRADE EXISTENCE CHECK ====================
 

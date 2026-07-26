@@ -85,10 +85,29 @@ def calculate_features(df):
 
     df = df.copy()
 
-    # ATR
-    df["atr"] = (
-        df["high"] - df["low"]
-    ).rolling(14).mean()
+    # ATR — Wilder's true ATR.
+    #
+    # This was `(high - low).rolling(14).mean()`: the mean *candle range*, which
+    # ignores the two gap terms of true range. Whenever a bar opened away from
+    # the previous close — every funding flush, liquidation wick and session
+    # gap — it understated real volatility, so it biased LOW exactly when
+    # volatility mattered most. Everything downstream reads this: stop distance
+    # (MIN_SL_ATR, STRUCTURE_SL_BUFFER_ATR), TP geometry, trailing distance,
+    # position size (risk / |entry-sl|), the displacement flag, and the
+    # atr_* model features. A biased ATR meant systematically tight stops.
+    #
+    # True range = max(high-low, |high-prev_close|, |low-prev_close|), smoothed
+    # with Wilder's RMA (an EMA with alpha = 1/period), not a simple mean.
+    prev_close = df["close"].shift(1)
+    true_range = pd.concat(
+        [
+            df["high"] - df["low"],
+            (df["high"] - prev_close).abs(),
+            (df["low"] - prev_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    df["atr"] = true_range.ewm(alpha=1 / 14, adjust=False, min_periods=14).mean()
 
     # Volume MA
     df["volume_ma"] = (

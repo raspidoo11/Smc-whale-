@@ -23,3 +23,6 @@ data/models/
 *.corrupt.*
 data/backups/
 data/pretrain_cache/
+
+# Local agent/editor tooling config
+.claude/

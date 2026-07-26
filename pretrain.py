@@ -30,7 +30,6 @@ import re
 from datetime import datetime, timezone
 
 import numpy as np
-import pandas as pd
 
 from config import DATA_DIR
 
@@ -38,10 +37,14 @@ logger = logging.getLogger(__name__)
 
 CACHE_DIR = os.path.join(DATA_DIR, "pretrain_cache")
 
-# Bump when the SIGNAL SNAPSHOT schema changes (new persisted fields): cached
-# corpus rows generated before the change would silently miss the new feature
-# (defaulting to 0 everywhere = a dead constant in CV). v2 = added CRT.
-CACHE_VERSION = 2
+# Bump when the SIGNAL SNAPSHOT schema changes (new persisted fields) OR when a
+# feature's DEFINITION changes: cached corpus rows generated before the change
+# would silently miss the new field (a dead constant in CV) or carry values
+# computed by the old formula (train/serve skew).
+#   v2 = added CRT
+#   v3 = ATR switched from mean candle range to Wilder true ATR, which moves
+#        every atr_* feature, the displacement flag, and all stop/TP geometry.
+CACHE_VERSION = 3
 
 # Liquid, non-meme perps across sectors — regime + symbol diversity.
 DEFAULT_SYMBOLS = [
@@ -55,15 +58,11 @@ DEFAULT_SYMBOLS = [
 BARS_PER_DAY = 288  # 5m bars
 
 
-def _exit_time_ms(trade):
-    """Approximate exit timestamp: entry_time + bars_held x 5m."""
-    t = pd.to_datetime(trade.get("entry_time"), utc=True)
-    bars = int(trade.get("bars_held", 1) or 1)
-    return int(t.timestamp() * 1000) + bars * 5 * 60 * 1000
-
-
-def _entry_time_ms(trade):
-    return int(pd.to_datetime(trade.get("entry_time"), utc=True).timestamp() * 1000)
+# Shared with the live trainer so offline CV and live retraining purge on
+# exactly the same clock. The local versions these replaced hardcoded a 5-minute
+# bar, which silently mis-sized the embargo whenever ENTRY_TF wasn't 5m.
+from xgboost_trainer import trade_entry_ms as _entry_time_ms  # noqa: E402
+from xgboost_trainer import trade_exit_ms as _exit_time_ms    # noqa: E402
 
 
 def purged_walk_forward_folds(entry_ms, exit_ms, n_folds=5, embargo_ms=24 * 3600 * 1000):
@@ -80,7 +79,14 @@ def purged_walk_forward_folds(entry_ms, exit_ms, n_folds=5, embargo_ms=24 * 3600
             prev = b
             continue
         test_start = entry_ms[test_idx[0]]
-        train_idx = [i for i in range(prev) if exit_ms[i] <= test_start - embargo_ms]
+        if test_start is None:
+            prev = b
+            continue  # untimestamped row: cannot purge honestly, skip the fold
+        cutoff = test_start - embargo_ms
+        train_idx = [
+            i for i in range(prev)
+            if exit_ms[i] is not None and exit_ms[i] <= cutoff
+        ]
         if train_idx and len(set(train_idx) & set(test_idx)) == 0:
             yield train_idx, test_idx
         prev = b

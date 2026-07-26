@@ -1,10 +1,19 @@
 import logging
-from trade_manager import get_balance, update_balance, add_trade, close_trade
+from trade_manager import (
+    get_balance, update_balance, add_trade, close_trade, get_risk_amount,
+)
+from config import MAKER_FEE_RATE, TAKER_FEE_RATE, ENTRY_MODE
 
 logger = logging.getLogger(__name__)
 
-MAX_RISK_PER_TRADE_USD = 5.0
-FEE_RATE = 0.0004
+# Fees now come from config (Bybit's real maker/taker split) instead of a single
+# blended 0.0004, which was simultaneously too high for maker fills (0.0002) and
+# too low for taker fills (0.00055) — so paper PnL was wrong in both directions.
+# A resting limit entry pays maker; a market entry pays taker.
+FEE_RATE = MAKER_FEE_RATE if ENTRY_MODE == "limit" else TAKER_FEE_RATE
+# Exits are market orders (SL/TP/trailing all fire at market), so they pay taker
+# regardless of how the position was entered.
+EXIT_FEE_RATE = TAKER_FEE_RATE
 LEVERAGE = 10
 
 
@@ -17,14 +26,19 @@ def get_numeric_balance():
 
 
 def calculate_qty(entry: float, sl: float) -> float:
-    """Calculate quantity so max loss = $5"""
+    """Size a paper position so a stop-out loses config.RISK_PERCENT of balance.
+
+    Was a flat $5 per trade regardless of balance. That never compounded (risk %
+    shrank as the account grew) and, more importantly, it did not match the live
+    path's percent-of-balance sizing — so paper results overstated live risk by
+    roughly 10x at a $100 balance. Both paths now call get_risk_amount().
+    """
     balance = get_numeric_balance()
     if entry == sl or entry == 0:
         return 0.0
 
     risk_per_unit = abs(entry - sl)
-    entry_fee_rate = FEE_RATE
-    risk_adjusted = MAX_RISK_PER_TRADE_USD / (1 + entry_fee_rate)
+    risk_adjusted = get_risk_amount() / (1 + FEE_RATE)
     raw_qty = risk_adjusted / risk_per_unit
     max_position_value = balance * LEVERAGE
     max_qty_by_leverage = max_position_value / entry
@@ -40,7 +54,7 @@ def calculate_entry_fee(entry_price: float, quantity: float) -> float:
 
 def calculate_exit_fee(exit_price: float, quantity: float) -> float:
     exit_value = exit_price * quantity
-    fee = exit_value * FEE_RATE
+    fee = exit_value * EXIT_FEE_RATE
     return round(fee, 2)
 
 
@@ -80,7 +94,7 @@ def open_paper_trade(signal: dict):
     add_trade(trade)
     logger.info(
         f"✅ OPENED: {signal['direction']} {signal.get('symbol')} "
-        f"| Qty: {qty} | Max Risk: ${MAX_RISK_PER_TRADE_USD} | Entry Fee: ${entry_fee:.2f}"
+        f"| Qty: {qty} | Risk: ${get_risk_amount():.2f} | Entry Fee: ${entry_fee:.2f}"
     )
     return trade
 

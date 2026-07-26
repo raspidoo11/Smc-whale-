@@ -66,9 +66,26 @@ _IS_SWING = SCAN_MODE == "swing"
 # ==========================================================
 START_BALANCE = float(os.getenv("START_BALANCE", 100))
 
-# Fraction of balance risked per trade (paper sizing). Keep this and
-# RISK_PERCENT (trade_manager) consistent — see README risk section.
-RISK_PER_TRADE = float(os.getenv("RISK_PER_TRADE", 0.05))
+# ----------------------------------------------------------
+# Per-trade risk — THE single source of truth, as a PERCENT of balance.
+# ----------------------------------------------------------
+# There used to be four different answers to "how much do we risk per trade":
+#   config.RISK_PER_TRADE  = 0.05   (5%, referenced by nothing)
+#   trade_manager.risk_amount()     (1%, called by nothing)
+#   trade_manager.get_risk_amount() (0.5% via RISK_PERCENT — the LIVE path)
+#   paper_trader.MAX_RISK_PER_TRADE_USD = 5.0  (a flat $5 — the PAPER path)
+#
+# The last two are the ones that actually ran, which meant paper trades risked
+# a flat $5 while live trades risked 0.5% of balance (~$0.50 at a $100 start).
+# Paper was therefore ~10x more aggressive than live, so no paper equity curve,
+# drawdown figure, or DAILY_LOSS_LIMIT calibration described live behaviour.
+# Everything now derives from this one number.
+RISK_PERCENT = float(os.getenv("RISK_PERCENT", 0.5))
+
+# Hard ceiling on per-trade risk as a percent of balance, applied AFTER the
+# AI confidence multiplier (see get_ai_risk_percent) so a confident model can
+# size up without an unbounded bet.
+MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", 2.5))
 
 # Hard daily loss stop, in account currency. Trading pauses for the day once
 # daily_pnl drops below -DAILY_LOSS_LIMIT.
@@ -97,6 +114,27 @@ MIN_EXPECTED_R = float(os.getenv("MIN_EXPECTED_R", 0.0))
 # not "pnl > 0". A +0.05R scratch teaches the model nothing worth repeating —
 # training on meaningful wins keeps it from learning to predict fee-noise.
 WIN_LABEL_MIN_R = float(os.getenv("WIN_LABEL_MIN_R", 0.5))
+
+# ----------------------------------------------------------
+# Triple-barrier labeling (see labeling.py)
+# ----------------------------------------------------------
+# Prefer triple-barrier labels over the bot's realized exit when the forward
+# price path is available. The realized exit folds trailing stops, time stops
+# and reconcile behaviour into the label, so every change to exit management
+# silently relabeled the whole corpus.
+USE_TRIPLE_BARRIER = os.getenv("USE_TRIPLE_BARRIER", "true").lower() == "true"
+
+# Vertical barrier: max holding time in ENTRY_TF bars. Scalp on 5m -> 48 bars =
+# 4h; swing on 30m -> 48 bars = 24h. A setup that has gone nowhere by then is
+# not the setup we thought we took.
+TB_MAX_BARS = int(os.getenv("TB_MAX_BARS", 48))
+
+# Optional ATR-scaled barriers instead of the trade's own sl/tp. Leave at 0 to
+# use sl/tp (the default and the right choice for meta-labeling — the secondary
+# model must predict whether THIS geometry works). Set both to research labels
+# that stay comparable across risk-geometry changes.
+TB_PROFIT_ATR = float(os.getenv("TB_PROFIT_ATR", 0))
+TB_STOP_ATR = float(os.getenv("TB_STOP_ATR", 0))
 
 # Model vote in final confidence (AI mode). AI_MAX_WEIGHT is the ceiling the
 # trust ramp climbs to; the ramp itself still applies — zero say below 30 real

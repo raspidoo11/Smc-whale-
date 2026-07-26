@@ -1,6 +1,8 @@
 """Money-math and state-machine tests — the parts where a silent bug costs
 real capital. No network, no model files required."""
 
+import pytest
+
 import paper_trader
 from paper_trader import (
     calculate_qty,
@@ -11,29 +13,65 @@ from paper_trader import (
 from xgboost_trainer import calculate_realized_r, calculate_historical_context
 
 
-def test_calculate_qty_caps_risk_at_5usd(monkeypatch):
-    # $5 max risk, $1 risk-per-unit -> ~5 units (minus the entry-fee haircut).
-    monkeypatch.setattr(paper_trader, "get_balance", lambda: {"balance": 100.0})
+def _balance(monkeypatch, amount):
+    """Pin the balance for BOTH paper_trader and the shared risk helper —
+    calculate_qty now sizes off trade_manager.get_risk_amount()."""
+    monkeypatch.setattr(paper_trader, "get_balance", lambda: {"balance": amount})
+    import trade_manager
+    monkeypatch.setattr(trade_manager, "get_balance", lambda: {"balance": amount})
+
+
+def test_calculate_qty_risks_configured_percent_of_balance(monkeypatch):
+    # RISK_PERCENT=0.5 of a $100 balance -> $0.50 at risk, $1 risk-per-unit
+    # -> ~0.5 units (minus the entry-fee haircut). Previously this was a flat
+    # $5 regardless of balance, i.e. ~10x the live path's risk.
+    from config import RISK_PERCENT
+    _balance(monkeypatch, 100.0)
     qty = calculate_qty(entry=100.0, sl=99.0)
-    assert 4.9 < qty < 5.0
+    expected = (100.0 * RISK_PERCENT / 100) / 1.0
+    assert expected * 0.98 < qty <= expected
+
+
+def test_calculate_qty_scales_with_balance(monkeypatch):
+    """Percent-of-balance sizing must compound; the old flat-$5 rule did not."""
+    _balance(monkeypatch, 100.0)
+    small = calculate_qty(entry=100.0, sl=99.0)
+    _balance(monkeypatch, 400.0)
+    large = calculate_qty(entry=100.0, sl=99.0)
+    assert large == pytest.approx(small * 4, rel=1e-3)
+
+
+def test_paper_and_live_share_one_risk_source(monkeypatch):
+    """Regression: paper risked a flat $5 while live risked 0.5% of balance, so
+    paper equity curves never described live behaviour."""
+    import trade_manager
+    _balance(monkeypatch, 250.0)
+    risk_per_unit = 2.0
+    qty = calculate_qty(entry=100.0, sl=100.0 - risk_per_unit)
+    implied_risk = qty * risk_per_unit
+    assert implied_risk == pytest.approx(trade_manager.get_risk_amount(), rel=0.01)
 
 
 def test_calculate_qty_respects_leverage_cap(monkeypatch):
     # Tiny stop distance would ask for a huge position; leverage cap must bind.
-    monkeypatch.setattr(paper_trader, "get_balance", lambda: {"balance": 100.0})
-    qty = calculate_qty(entry=100.0, sl=99.999)
+    _balance(monkeypatch, 100.0)
+    qty = calculate_qty(entry=100.0, sl=99.99999)
     # max notional = balance * leverage = 1000 -> max qty = 1000/100 = 10
     assert qty == 10.0
 
 
 def test_calculate_qty_zero_on_degenerate_stop(monkeypatch):
-    monkeypatch.setattr(paper_trader, "get_balance", lambda: {"balance": 100.0})
+    _balance(monkeypatch, 100.0)
     assert calculate_qty(entry=100.0, sl=100.0) == 0.0
 
 
-def test_fees_are_symmetric_and_correct():
-    assert calculate_entry_fee(100.0, 5.0) == 0.2   # 500 notional * 0.0004
-    assert calculate_exit_fee(100.0, 5.0) == 0.2
+def test_fees_use_the_real_maker_taker_split():
+    from config import MAKER_FEE_RATE, TAKER_FEE_RATE
+    # Entry pays maker in limit mode; exits always fire at market -> taker.
+    assert calculate_entry_fee(100.0, 5.0) == round(500 * paper_trader.FEE_RATE, 2)
+    assert calculate_exit_fee(100.0, 5.0) == round(500 * TAKER_FEE_RATE, 2)
+    assert paper_trader.EXIT_FEE_RATE == TAKER_FEE_RATE
+    assert paper_trader.FEE_RATE in (MAKER_FEE_RATE, TAKER_FEE_RATE)
 
 
 def test_realized_r_long_and_short():

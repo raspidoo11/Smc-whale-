@@ -38,10 +38,20 @@ from config import (
     BIAS_TF,
     ENTRY_TF_MINUTES,
     TRAIL_ATR_MULT,
+    RISK_PERCENT,
+    USE_TRIPLE_BARRIER,
+    TB_MAX_BARS,
+    TB_PROFIT_ATR,
+    TB_STOP_ATR,
 )
+from labeling import label_trade
 
 logger = logging.getLogger(__name__)
-RISK_FRACTION = 0.05       # fraction of running equity risked per trade
+# Fraction of running equity risked per trade. Was a hardcoded 0.05 (5%) — a
+# fifth independent answer to "how much do we risk", alongside paper's flat $5
+# and live's 0.5%. Backtest equity curves and drawdowns only mean something if
+# they size the way the live bot sizes.
+RISK_FRACTION = RISK_PERCENT / 100.0
 WARMUP = 60                # bars of context before the first possible signal
 WINDOW = 250               # rolling df length handed to get_signal
 # Resting-order TTL in ENTRY-TF bars (follows SCAN_MODE: 5m scalp, 30m swing).
@@ -255,8 +265,30 @@ def simulate(symbol, df_5m, df_15m, use_xgboost=False, context_provider=None):
             status = "WIN" if pnl > 0 else "LOSS"
             r_mult = ((exit_price - entry) if direction == "LONG" else (entry - exit_price)) / per_unit
 
+            # Triple-barrier label over the SAME forward path the exit walk used.
+            # Independent of trailing/time-stop management, so changing exit code
+            # no longer relabels the corpus. See labeling.py.
+            tb_fields = {}
+            if USE_TRIPLE_BARRIER:
+                outcome = label_trade(
+                    {"direction": direction, "entry": entry, "tp": tp, "sl": sl,
+                     "atr": signal.get("atr")},
+                    highs[start:], lows[start:], closes[start:],
+                    max_bars=TB_MAX_BARS,
+                    profit_atr=TB_PROFIT_ATR or None,
+                    stop_atr=TB_STOP_ATR or None,
+                )
+                if outcome is not None:
+                    tb_fields = outcome.as_dict()
+                    # Label horizon end, for purged CV: when the LABEL resolved,
+                    # which is not the same bar the managed trade exited on.
+                    tb_fields["tb_exit_time"] = str(
+                        index[min(start + outcome.bars_to_touch, len(index) - 1)]
+                    )
+
             closed = {
                 **signal,
+                **tb_fields,   # after **signal so the labels computed here win
                 "symbol": symbol,
                 # Override with the ACTUAL fill economics (limit entry price /
                 # recomputed TP), not the signal-close values from **signal —
