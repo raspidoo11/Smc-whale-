@@ -263,3 +263,81 @@ def test_model_that_takes_no_trades_is_not_promoted_on_ev():
     assert promote is True  # AUC fallback
     promote, _ = promotion_decision(metrics(auc=0.45, ev_r=None), None)
     assert promote is False
+
+
+# --------------------------------------------------------------------------
+# Operating point: quantile selection, not a fixed 0.5 cut
+# --------------------------------------------------------------------------
+
+class _StubModel:
+    """Returns fixed probabilities so evaluate_model can be tested directly."""
+
+    def __init__(self, probs):
+        self._probs = np.asarray(probs, dtype=float)
+
+    def predict_proba(self, X):
+        p = self._probs[: len(X)]
+        return np.column_stack([1 - p, p])
+
+
+def test_rare_positive_class_still_produces_expected_r():
+    """Regression: with a ~31% base rate a calibrated model emits almost
+    nothing above 0.5, so a fixed threshold selected ZERO holdout rows, left
+    ev_r undefined, and the gate silently fell back to AUC."""
+    from xgboost_trainer import evaluate_model
+
+    n = 15
+    probs = np.linspace(0.05, 0.45, n)          # nothing reaches 0.5
+    y = pd.Series([0] * 10 + [1] * 5)
+    r = pd.Series([-1.0] * 10 + [2.0] * 5)
+
+    m = evaluate_model(_StubModel(probs), pd.DataFrame(np.zeros((n, 1))), y, r_test=r)
+    assert m["n_selected"] > 0, "must still select a slice to score"
+    assert m["ev_r"] is not None
+    assert m["precision"] is not None
+    assert m["threshold"] < 0.5
+
+
+def test_select_top_k_takes_the_highest_probabilities():
+    from xgboost_trainer import select_top_k
+
+    probs = np.array([0.1, 0.9, 0.5, 0.7, 0.3])
+    mask, cutoff = select_top_k(probs, fraction=0.4, min_selected=1)
+    assert mask.sum() == 2
+    assert set(probs[mask]) == {0.9, 0.7}
+    assert cutoff == 0.7
+
+
+def test_select_top_k_respects_minimum():
+    from xgboost_trainer import select_top_k
+
+    probs = np.linspace(0, 1, 20)
+    mask, _ = select_top_k(probs, fraction=0.01, min_selected=5)
+    assert mask.sum() == 5
+
+
+def test_select_top_k_never_exceeds_available_rows():
+    from xgboost_trainer import select_top_k
+
+    probs = np.array([0.2, 0.8])
+    mask, _ = select_top_k(probs, fraction=1.0, min_selected=50)
+    assert mask.sum() == 2
+
+
+def test_select_top_k_handles_empty():
+    from xgboost_trainer import select_top_k
+
+    mask, cutoff = select_top_k(np.array([]))
+    assert mask.sum() == 0 and cutoff is None
+
+
+def test_explicit_threshold_still_honoured():
+    """Callers may pin a threshold; quantile selection is only the default."""
+    from xgboost_trainer import evaluate_model
+
+    n = 10
+    probs = np.linspace(0.1, 0.9, n)
+    y = pd.Series([0, 1] * 5)
+    m = evaluate_model(_StubModel(probs), pd.DataFrame(np.zeros((n, 1))), y, threshold=0.8)
+    assert m["threshold"] == 0.8
+    assert m["n_selected"] == int((probs >= 0.8).sum())

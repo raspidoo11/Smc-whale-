@@ -12,21 +12,34 @@ _trade_client = None
 def get_exchange():
     """
     CCXT exchange for public market data only.
+
+    BYBIT_HOSTNAME overrides the API domain. Bybit serves the same API from
+    bytick.com, which is the documented fallback when api.bybit.com is blocked
+    from a given network/region — set BYBIT_HOSTNAME=bytick.com to backtest or
+    scan from such a machine without touching any other code.
     """
     global _public_exchange
 
     if _public_exchange is None:
-        _public_exchange = ccxt.bybit({
+        config = {
             "enableRateLimit": True,
             "timeout": 30000,
             "options": {
                 "defaultType": "swap",
                 "defaultSettle": "USDT",
             },
-        })
+        }
+        hostname = os.getenv("BYBIT_HOSTNAME")
+        if hostname:
+            config["hostname"] = hostname
+
+        _public_exchange = ccxt.bybit(config)
 
         _public_exchange.load_markets()
-        logger.info(f"✅ Loaded {_public_exchange.id} markets")
+        logger.info(
+            f"✅ Loaded {_public_exchange.id} markets"
+            + (f" via {hostname}" if hostname else "")
+        )
 
     return _public_exchange
 

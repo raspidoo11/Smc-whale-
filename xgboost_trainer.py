@@ -66,7 +66,16 @@ MIN_TRAIN_ROWS = 15
 # ranks the whole probability range — but the bot only ever acts on setups
 # above a confidence bar, so what matters is whether the trades it WOULD take
 # are profitable. These define "would take" for scoring purposes.
-PROMOTION_PROB_THRESHOLD = float(os.getenv("PROMOTION_PROB_THRESHOLD", 0.5))
+#
+# Selection is by QUANTILE, not a fixed probability cut. A fixed 0.5 threshold
+# is meaningless when the positive class is rare: with a ~31% base rate the
+# calibrated model correctly emits almost nothing above 0.5, so n_selected
+# collapsed to 0, expected R came back undefined, and the gate silently fell
+# through to the AUC comparison it was built to replace. Taking the top
+# fraction of predictions always yields a scoreable slice and matches how the
+# bot actually behaves — it trades its best setups, not its >50% ones.
+PROMOTION_SELECT_FRACTION = float(os.getenv("PROMOTION_SELECT_FRACTION", 0.30))
+PROMOTION_MIN_SELECTED = int(os.getenv("PROMOTION_MIN_SELECTED", 5))
 # Challenger must beat the champion's expected R by this much to take over —
 # stops churn on noise when both are effectively equivalent.
 PROMOTION_EV_MARGIN = float(os.getenv("PROMOTION_EV_MARGIN", 0.02))
@@ -647,6 +656,28 @@ class EnsembleClassifier:
         return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
 
 
+def select_top_k(probs, fraction=None, min_selected=None):
+    """Boolean mask over the top `fraction` of predictions by probability.
+
+    Always selects at least `min_selected` (or everything, if the holdout is
+    smaller), so the expected-R and precision metrics are defined even when a
+    calibrated model on a rare positive class never crosses 0.5.
+    """
+    fraction = PROMOTION_SELECT_FRACTION if fraction is None else fraction
+    min_selected = PROMOTION_MIN_SELECTED if min_selected is None else min_selected
+
+    n = len(probs)
+    if n == 0:
+        return np.zeros(0, dtype=bool), None
+
+    k = max(min_selected, int(np.ceil(n * fraction)))
+    k = min(k, n)
+    # k-th highest probability becomes the effective operating threshold.
+    cutoff = np.partition(probs, n - k)[n - k]
+    mask = probs >= cutoff
+    return mask, float(cutoff)
+
+
 def evaluate_model(model, X_test, y_test, r_test=None, threshold=None):
     """Score a model on a holdout.
 
@@ -664,7 +695,6 @@ def evaluate_model(model, X_test, y_test, r_test=None, threshold=None):
     if len(X_test) == 0 or y_test.nunique() < 2:
         return None
 
-    threshold = PROMOTION_PROB_THRESHOLD if threshold is None else threshold
     probs = model.predict_proba(X_test)[:, 1]
 
     try:
@@ -678,7 +708,11 @@ def evaluate_model(model, X_test, y_test, r_test=None, threshold=None):
     brier = brier_score_loss(y_test, probs)
 
     base_rate = float(y_test.mean())
-    selected = probs >= threshold
+    if threshold is None:
+        selected, effective_threshold = select_top_k(probs)
+    else:
+        selected = probs >= threshold
+        effective_threshold = threshold
     n_selected = int(selected.sum())
 
     if n_selected:
@@ -690,9 +724,6 @@ def evaluate_model(model, X_test, y_test, r_test=None, threshold=None):
         else:
             ev_r = None
     else:
-        # Nothing cleared the bar: the model would simply not trade. That is
-        # not a failure, but it is also not evidence of skill — leave the
-        # decision metrics undefined so the gate falls through to AUC.
         precision = precision_lift = ev_r = None
 
     return {
@@ -700,7 +731,8 @@ def evaluate_model(model, X_test, y_test, r_test=None, threshold=None):
         "log_loss": ll,
         "brier": brier,
         "n_test": len(y_test),
-        "threshold": threshold,
+        "threshold": None if effective_threshold is None else round(effective_threshold, 4),
+        "select_fraction": PROMOTION_SELECT_FRACTION if threshold is None else None,
         "n_selected": n_selected,
         "base_rate": round(base_rate, 4),
         "precision": None if precision is None else round(precision, 4),
@@ -1177,8 +1209,8 @@ def train_model_incremental(force_retrain=False):
             f"   Holdout: expected R {_fmt('ev_r', '+.3f')} | "
             f"precision {_fmt('precision')} vs base {_fmt('base_rate')} "
             f"(lift {_fmt('precision_lift', '+.3f')}) | "
-            f"took {challenger_metrics.get('n_selected')}/{challenger_metrics.get('n_test')} "
-            f"@p>={challenger_metrics.get('threshold')}"
+            f"took top {challenger_metrics.get('n_selected')}/{challenger_metrics.get('n_test')} "
+            f"(p>={challenger_metrics.get('threshold')})"
         )
         logger.info(f"   Holdout (ranking/calibration): AUC {_fmt('auc')} | Brier {_fmt('brier')}")
 
@@ -1221,7 +1253,8 @@ def train_model_incremental(force_retrain=False):
         "split_method": "chronological+purged+embargo",
         "embargo_hours": EMBARGO_HOURS,
         "promotion_metric": "expected_r -> precision_lift -> auc",
-        "promotion_threshold": PROMOTION_PROB_THRESHOLD,
+        "promotion_select_fraction": PROMOTION_SELECT_FRACTION,
+        "promotion_effective_threshold": (challenger_metrics or {}).get("threshold"),
         "feature_list": X_full.columns.tolist(),
         "n_features": len(X_full.columns),
         "dropped_features": list(set(DROP_FEATURES + get_decayed_features(feature_history))),
