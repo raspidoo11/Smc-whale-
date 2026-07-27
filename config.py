@@ -124,10 +124,22 @@ WIN_LABEL_MIN_R = float(os.getenv("WIN_LABEL_MIN_R", 0.5))
 # silently relabeled the whole corpus.
 USE_TRIPLE_BARRIER = os.getenv("USE_TRIPLE_BARRIER", "true").lower() == "true"
 
-# Vertical barrier: max holding time in ENTRY_TF bars. Scalp on 5m -> 48 bars =
-# 4h; swing on 30m -> 48 bars = 24h. A setup that has gone nowhere by then is
-# not the setup we thought we took.
-TB_MAX_BARS = int(os.getenv("TB_MAX_BARS", 48))
+# Vertical barrier: max holding time in ENTRY_TF bars. 288 bars = 24h on 5m.
+#
+# Calibrated against 94 backtested trades (BTC/ETH/SOL/XRP). At the previous
+# default of 48 (4h), 71% of labels resolved at the vertical barrier — the
+# label meant "price went nowhere in 4h" rather than "the setup worked", and
+# the positive class sat at 28.7%. Sweeping the cap:
+#     48 -> 71.3% timeout, 28.7% positive
+#     96 -> 48.9% timeout, 30.9% positive
+#    144 -> 41.5% timeout, 30.9% positive
+#    288 -> 24.5% timeout, 41.5% positive   <- knee
+#    576 -> 11.7% timeout, 40.4% positive
+#   1152 ->  4.3% timeout, 41.5% positive
+# 288 is the knee: most labels resolve at a real barrier and the classes are
+# roughly balanced. Going longer buys little and costs more — a longer label
+# horizon purges more training rows out of every chronological split.
+TB_MAX_BARS = int(os.getenv("TB_MAX_BARS", 288))
 
 # Optional ATR-scaled barriers instead of the trade's own sl/tp. Leave at 0 to
 # use sl/tp (the default and the right choice for meta-labeling — the secondary
